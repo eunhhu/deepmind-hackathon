@@ -46,6 +46,7 @@ jobs:
       - name: Authenticate to Google Cloud (WIF or SA Key)
         uses: google-github-actions/auth@v2
         with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           credentials_json: ${{ secrets.GCP_SA_KEY }}
@@ -99,6 +100,7 @@ jobs:
       - name: Authenticate to Google Cloud (WIF or SA Key)
         uses: google-github-actions/auth@v2
         with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           credentials_json: ${{ secrets.GCP_SA_KEY }}
