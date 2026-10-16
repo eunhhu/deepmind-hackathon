@@ -7,10 +7,10 @@ import { FRONTEND_MODULES, getFrontendModule } from "./modules/registry";
 
 export function App() {
   const [activeModuleId, setActiveModuleId] = createSignal<string>(
-    FRONTEND_MODULES[0]?.id ?? "workspace",
+    FRONTEND_MODULES[0]?.id ?? "aegis",
   );
   const [backendModules, setBackendModules] = createSignal<FeatureModuleMeta[]>([]);
-  const [showArchGuide, setShowArchGuide] = createSignal<boolean>(true);
+  const [showArchGuide, setShowArchGuide] = createSignal<boolean>(false);
 
   onMount(async () => {
     try {
@@ -33,27 +33,26 @@ export function App() {
           <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
             <div class="space-y-1">
               <div class="flex flex-wrap items-center gap-2.5">
+                <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-semibold bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400">
+                  AEGIS-4
+                </span>
                 <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                  gemini-4-argon
+                  gemini-4-argon + antigravity-preview-09-2026
                 </span>
                 <h1 class="text-lg sm:text-xl font-bold text-gray-900 dark:text-white tracking-tight">
-                  Hackathon Modular AI Command Center
+                  Autonomous Exploit Verification, Binary Hot-Patch &amp; Route-Shield Platform
                 </h1>
               </div>
               <p class="text-xs sm:text-sm text-gray-600 dark:text-neutral-400">
-                SolidJS Zero-VDOM UI &bull; Preline UI + Tailwind v4 &bull; Firebase Identity
-                Platform &bull; Cloud Firestore (asia-northeast3) &bull; Go 1.27 + Interactions API
-                v1beta
+                Zero-False-Positive Sandbox PoC (RED &rarr; GREEN) &bull; DNS TXT Ownership Gate
+                &bull; GitHub Security PR &bull; ELF64 Binary Hot-Patch &bull; Live Edge Route
+                Shield
               </p>
             </div>
 
             <div class="flex flex-wrap items-center gap-2">
               <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
-                <span>Frontend Modules:</span>
-                <strong class="font-semibold">{FRONTEND_MODULES.length}</strong>
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                <span>Backend Modules:</span>
+                <span>Modules:</span>
                 <strong class="font-semibold">
                   {backendModules().length || FRONTEND_MODULES.length}
                 </strong>
@@ -63,7 +62,7 @@ export function App() {
                 class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer transition-colors"
                 onClick={() => setShowArchGuide((prev) => !prev)}
               >
-                {showArchGuide() ? "Hide Architecture" : "Show Architecture"}
+                {showArchGuide() ? "Hide Architecture" : "Platform Architecture"}
               </button>
             </div>
           </div>
@@ -75,54 +74,48 @@ export function App() {
                 <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 space-y-2">
                   <div class="flex items-center justify-between gap-x-2">
                     <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                      1. Parallel Subagent Sharding
+                      1. 3-Mode Intake &amp; DNS Gate
                     </span>
-                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">
-                      1 file / agent
-                    </span>
+                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">FR-1</span>
                   </div>
                   <code class="text-xs font-mono text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded-md block truncate">
-                    micro-coder &bull; preline-ui-specialist &bull; critic-polisher
+                    github &bull; url-dns (_aegis-verify TXT) &bull; binary
                   </code>
                   <p class="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
-                    Zero-conflict file-sharded subagent dispatch — 1 file per subagent for rapid
-                    parallel implementation.
+                    Auto-classifies GitHub CD workflows, enforces Google DoH DNS TXT domain
+                    ownership before scanning, and parses ELF64/PE32+/Mach-O headers.
                   </p>
                 </div>
 
                 <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 space-y-2">
                   <div class="flex items-center justify-between gap-x-2">
                     <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
-                      2. Dynamic Effort Router + Critic Loop
+                      2. Red-to-Green Sandbox Loop
                     </span>
-                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">
-                      3-tier cascade
-                    </span>
+                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">FR-2</span>
                   </div>
                   <code class="text-xs font-mono text-teal-700 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-1 rounded-md block truncate">
-                    gemini-3.5-flash-lite -&gt; gemini-4-argon -&gt; antigravity-preview-09-2026
+                    Recon -&gt; PoC (RED) -&gt; Patch -&gt; Re-Verify (GREEN)
                   </code>
                   <p class="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
-                    Adaptive complexity routing with automated critic verification and instant
-                    fallback escalation.
+                    Zero false positives: every finding is proved with a live sandbox PoC before
+                    remediation and re-tested post-patch until blocked.
                   </p>
                 </div>
 
                 <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 space-y-2 sm:col-span-2 lg:col-span-1">
                   <div class="flex items-center justify-between gap-x-2">
                     <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-                      3. Zero-Conflict Module Registry
+                      3. Tri-Mode Self-Healing
                     </span>
-                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">
-                      Plug &amp; Play
-                    </span>
+                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">FR-3</span>
                   </div>
                   <code class="text-xs font-mono text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-1 rounded-md block truncate">
-                    apps/api/internal/modules/&lt;unit&gt; + apps/web/src/modules/&lt;unit&gt;
+                    git-pr &bull; binary-patch &bull; route-shield
                   </code>
                   <p class="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
-                    Isolated Go Gin endpoints, Firestore collections, and SolidJS feature modules
-                    mounted dynamically.
+                    Generates source code GitHub PR diffs, instruction-level binary hot-patches with
+                    1-click ELF download, and live Edge Route Shields.
                   </p>
                 </div>
               </div>

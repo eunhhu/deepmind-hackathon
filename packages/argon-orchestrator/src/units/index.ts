@@ -1,5 +1,17 @@
 import { AgentUnitRegistry } from "../registry";
 import {
+  AEGIS_AGENT_UNITS,
+  type AegisClassifierOutput,
+  type AegisClassifierPayload,
+  type AegisSandboxPocOutput,
+  type AegisSandboxPocPayload,
+  type AegisTriRemediatorOutput,
+  type AegisTriRemediatorPayload,
+  aegisClassifierUnit,
+  aegisSandboxPocUnit,
+  aegisTriRemediatorUnit,
+} from "./aegisAgents";
+import {
   parseWorkspaceSynthesizerOutput,
   type WorkspaceSynthesizerOutput,
   type WorkspaceSynthesizerPayload,
@@ -7,6 +19,16 @@ import {
 } from "./workspaceSynthesizer";
 
 export {
+  AEGIS_AGENT_UNITS,
+  type AegisClassifierOutput,
+  type AegisClassifierPayload,
+  type AegisSandboxPocOutput,
+  type AegisSandboxPocPayload,
+  type AegisTriRemediatorOutput,
+  type AegisTriRemediatorPayload,
+  aegisClassifierUnit,
+  aegisSandboxPocUnit,
+  aegisTriRemediatorUnit,
   parseWorkspaceSynthesizerOutput,
   type WorkspaceSynthesizerOutput,
   type WorkspaceSynthesizerPayload,
@@ -17,4 +39,8 @@ export {
  * Default pre-populated registry containing all built-in Gemini 4 Argon agent units.
  * Parallel subagents can register additional domain units here or on custom registries.
  */
-export const defaultRegistry = new AgentUnitRegistry().register(workspaceSynthesizerUnit);
+export const defaultRegistry = new AgentUnitRegistry()
+  .register(workspaceSynthesizerUnit)
+  .register(aegisClassifierUnit)
+  .register(aegisSandboxPocUnit)
+  .register(aegisTriRemediatorUnit);

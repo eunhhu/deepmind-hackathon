@@ -233,4 +233,51 @@ describe("AgentUnitRegistry & workspace-synthesizer unit", () => {
     expect(polishRes.critiqueItems.length).toBeGreaterThanOrEqual(3);
     expect(polishRes.polishedOutput).toContain("Draft Card");
   });
+
+  it("registers and executes AEGIS-4 security units (aegis-cd-classifier, aegis-sandbox-poc, aegis-tri-remediator) in dryRun mode", async () => {
+    expect(defaultRegistry.get("aegis-cd-classifier")).toBeDefined();
+    expect(defaultRegistry.get("aegis-sandbox-poc")).toBeDefined();
+    expect(defaultRegistry.get("aegis-tri-remediator")).toBeDefined();
+    expect(defaultRegistry.get("aegis-sandbox-poc")?.useManagedAgent).toBe(true);
+
+    const orchestrator = new ArgonParallelOrchestrator();
+    const results = await defaultRegistry.runUnitsParallel(
+      orchestrator,
+      [
+        {
+          unitId: "aegis-cd-classifier",
+          payload: {
+            name: "Checkout Edge Gateway",
+            intakeMode: "github",
+            repoUrl: "https://github.com/acme/checkout-gateway",
+          },
+        },
+        {
+          unitId: "aegis-sandbox-poc",
+          payload: {
+            targetName: "Checkout Edge Gateway",
+            targetType: "api",
+            cveOrCwe: "CVE-2026-4108",
+            location: "internal/auth/jwt_middleware.go:88",
+            pocPayload: 'curl -H "Authorization: Bearer ..."',
+            phase: "red",
+          },
+        },
+        {
+          unitId: "aegis-tri-remediator",
+          payload: {
+            targetName: "Checkout Edge Gateway",
+            remediationMode: "git-pr",
+            vulnerabilityTitle: "SQL Injection in JWT kid Header",
+            location: "internal/auth/jwt_middleware.go:88",
+            rootCause: "Unparameterized SQL query concatenation on JWT header kid parameter",
+          },
+        },
+      ],
+      { dryRun: true },
+    );
+
+    expect(results).toHaveLength(3);
+    expect(results.every((r) => r.status === "completed")).toBe(true);
+  });
 });

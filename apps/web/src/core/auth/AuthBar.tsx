@@ -91,11 +91,11 @@ export function AuthBar() {
         {/* Left side: Brand logo, title, GCP project pill, Store Backend pill */}
         <div class="flex flex-wrap items-center gap-2.5">
           <div class="flex items-center gap-x-2.5">
-            <div class="size-8 rounded-lg bg-blue-600 text-white font-bold flex items-center justify-center shadow-2xs text-sm">
-              G4
+            <div class="size-8 rounded-lg bg-blue-600 text-white font-bold flex items-center justify-center shadow-2xs text-xs tracking-tighter">
+              A4
             </div>
             <span class="text-sm font-semibold text-gray-900 dark:text-white tracking-tight">
-              Gemini 4 Argon
+              AEGIS-4 &bull; Gemini 4 Argon
             </span>
           </div>
 

@@ -278,3 +278,205 @@ export interface VerifyCritiquePolishResponse {
   totalDurationMs: number;
   steps: ParallelTaskResult[];
 }
+
+// ============================================================================
+// 6. AEGIS-4: Autonomous Exploit Verification, Binary Hot-Patch & Route-Shield
+// ============================================================================
+
+export type AegisIntakeMode = "github" | "url-dns" | "binary";
+
+export type AegisTargetType = "web" | "api" | "binary" | "hybrid";
+
+export type AegisRemediationMode = "git-pr" | "binary-patch" | "route-shield";
+
+export type AegisDefenseStatus =
+  | "unprotected"
+  | "poc_confirmed_red"
+  | "patched_via_pr"
+  | "protected_via_route_shield"
+  | "binary_hard_patched";
+
+export type AegisSeverity = "critical" | "high" | "medium" | "low";
+
+export type AegisStageId = "recon" | "poc_red" | "remediation" | "verify_green";
+
+export type AegisStageStatus = "pending" | "running" | "passed_green" | "confirmed_red" | "failed";
+
+export interface AegisTimelineStep {
+  stage: AegisStageId;
+  title: string;
+  modelUsed: string;
+  status: AegisStageStatus;
+  durationMs: number;
+  summary: string;
+  commandOrLog: string;
+  timestamp: string;
+}
+
+export interface AegisCodePatchDiff {
+  filePath: string;
+  language: string;
+  beforeCode: string;
+  afterCode: string;
+  unifiedDiff: string;
+  explanation: string;
+}
+
+export interface AegisGitHubPrReport {
+  branchName: string;
+  prNumber: number;
+  prTitle: string;
+  prUrl: string;
+  commitSha: string;
+  status: "open" | "merged" | "draft";
+  ciChecksPassed: boolean;
+  markdownComment: string;
+  codeDiff: AegisCodePatchDiff;
+}
+
+export interface AegisBinaryPatchInstruction {
+  offsetHex: string;
+  section: string;
+  functionName: string;
+  beforeBytesHex: string;
+  afterBytesHex: string;
+  beforeAsm: string;
+  afterAsm: string;
+  rationale: string;
+}
+
+export interface AegisBinaryAnalysis {
+  fileName: string;
+  format: "ELF64-x86_64" | "PE32+-x64" | "Mach-O-arm64" | "APK-Dalvik";
+  fileSizeBytes: number;
+  sha256Before: string;
+  sha256After: string;
+  protections: {
+    nxEnabled: boolean;
+    pieEnabled: boolean;
+    stackCanary: boolean;
+    relro: "full" | "partial" | "none";
+  };
+  dangerousSinks: string[];
+  patchInstructions: AegisBinaryPatchInstruction[];
+  sandboxBeforeLog: string;
+  sandboxAfterLog: string;
+  downloadUrl: string;
+}
+
+export interface AegisRouteShieldRule {
+  ruleId: string;
+  enabled: boolean;
+  protectedPath: string;
+  methods: string[];
+  blockPatternRegex: string;
+  rateLimitRps: number;
+  blockedRequestsCount: number;
+  lastBlockedAt?: string;
+  sampleAttackPayload: string;
+  snippets: {
+    cloudRunGin: string;
+    cloudArmor: string;
+    cloudflareWorker: string;
+    nginx: string;
+    envoy: string;
+  };
+}
+
+export interface AegisVulnerabilityFinding {
+  id: string;
+  cveOrCwe: string;
+  title: string;
+  severity: AegisSeverity;
+  cvssScore: number;
+  location: string;
+  rootCause: string;
+  attackVector: string;
+  pocPayload: string;
+  pocRedLog: string;
+  verifyGreenLog: string;
+  zeroFalsePositiveConfirmed: boolean;
+}
+
+export interface AegisProject {
+  id: string;
+  name: string;
+  subtitle: string;
+  intakeMode: AegisIntakeMode;
+  targetType: AegisTargetType;
+  remediationMode: AegisRemediationMode;
+  defenseStatus: AegisDefenseStatus;
+  // Intake specifics
+  repoUrl?: string;
+  cdWorkflowPath?: string;
+  targetUrl?: string;
+  dnsDomain?: string;
+  dnsTxtRecordName?: string;
+  dnsTxtToken?: string;
+  dnsVerified: boolean;
+  binaryFileName?: string;
+  // Core security telemetry
+  vulnerabilities: AegisVulnerabilityFinding[];
+  timeline: AegisTimelineStep[];
+  gitPrReport?: AegisGitHubPrReport;
+  binaryAnalysis?: AegisBinaryAnalysis;
+  routeShield?: AegisRouteShieldRule;
+  lastScanDurationMs: number;
+  updatedAt: string;
+}
+
+export interface CreateAegisProjectRequest {
+  name: string;
+  intakeMode: AegisIntakeMode;
+  repoUrl?: string;
+  cdConfigSnippet?: string;
+  targetUrl?: string;
+  binaryFileName?: string;
+  binarySizeBytes?: number;
+  binaryHexPreview?: string;
+}
+
+export interface AegisVerifyDnsRequest {
+  projectId: string;
+  simulateTxtPropagation?: boolean;
+}
+
+export interface AegisVerifyDnsResponse {
+  projectId: string;
+  domain: string;
+  txtRecordName: string;
+  expectedToken: string;
+  dnsVerified: boolean;
+  resolverUsed: string;
+  message: string;
+  project: AegisProject;
+}
+
+export interface AegisRunPipelineRequest {
+  projectId: string;
+  remediationMode?: AegisRemediationMode;
+  dryRun?: boolean;
+}
+
+export interface AegisRunPipelineResponse {
+  project: AegisProject;
+  interactionIds: string[];
+  totalDurationMs: number;
+}
+
+export interface AegisShieldTestAttackRequest {
+  projectId: string;
+  attackPath?: string;
+  attackPayload?: string;
+}
+
+export interface AegisShieldTestAttackResponse {
+  projectId: string;
+  shieldEnabled: boolean;
+  httpStatus: number;
+  verdict: "BLOCKED_GREEN" | "EXPLOITED_RED";
+  ruleTriggered?: string;
+  responseBody: string;
+  latencyMs: number;
+  project: AegisProject;
+}

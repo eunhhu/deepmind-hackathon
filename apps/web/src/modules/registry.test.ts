@@ -32,8 +32,15 @@ describe("Frontend Auth, API Client & Plug-and-Play Module Registry", () => {
     signInDemo("Argon Hackathon Builder");
   });
 
-  test("FRONTEND_MODULES registers workspace and swarm modules with valid metadata", () => {
-    expect(FRONTEND_MODULES.length).toBeGreaterThanOrEqual(2);
+  test("FRONTEND_MODULES registers aegis, workspace, and swarm modules with valid metadata", () => {
+    expect(FRONTEND_MODULES.length).toBeGreaterThanOrEqual(3);
+    expect(FRONTEND_MODULES[0]?.id).toBe("aegis");
+
+    const aegisMod = getFrontendModule("aegis");
+    expect(aegisMod).toBeDefined();
+    expect(aegisMod?.apiPrefix).toBe("/api/modules/aegis");
+    expect(aegisMod?.collections).toContain("aegis_projects");
+    expect(aegisMod?.agentUnitIds).toContain("aegis-tri-remediator");
 
     const workspaceMod = getFrontendModule("workspace");
     expect(workspaceMod).toBeDefined();

@@ -11,6 +11,7 @@ import (
 	"deepmind/api/internal/argon"
 	"deepmind/api/internal/auth"
 	"deepmind/api/internal/modules"
+	"deepmind/api/internal/modules/aegis"
 	"deepmind/api/internal/modules/pipeline"
 	"deepmind/api/internal/modules/workspace"
 	"deepmind/api/internal/store"
@@ -166,6 +167,7 @@ func buildRouter(client *argon.Client, verifier *auth.Verifier, storeInstance st
 
 	// Plug-and-play backend feature modules registry
 	reg := modules.NewRegistry()
+	reg.Register(aegis.NewModule())
 	reg.Register(workspace.New())
 	reg.Register(pipeline.NewModule())
 	reg.Mount(r, &modules.Dependencies{
