@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_FIREBASE_CONFIG } from "@deepmind/shared";
-import { buildAuthHeaders } from "../core/api/client";
+import {
+  buildAuthHeaders,
+  createAegisGitHubPr,
+  getAegisBinaryDownloadUrl,
+  getAegisPatchDownloadUrl,
+  getAegisShieldProxyUrl,
+  polishAegisProject,
+  streamAegisPipeline,
+  updateAegisShieldRule,
+  uploadAegisBinary,
+} from "../core/api/client";
 import { getActiveFirebaseConfig, signInDemo, signOut, useAuth } from "../core/auth/firebaseAuth";
 import { FRONTEND_MODULES, getFrontendModule, registerFrontendModule } from "./registry";
 
@@ -66,5 +76,22 @@ describe("Frontend Auth, API Client & Plug-and-Play Module Registry", () => {
     });
 
     expect(getFrontendModule("custom-unit")?.title).toBe(customMod.title);
+  });
+
+  test("AEGIS-4 API client exports all Tri-Mode remediation, streaming, and proxy helpers", () => {
+    expect(getAegisBinaryDownloadUrl("aegis-binary-iot")).toBe(
+      "/api/modules/aegis/projects/aegis-binary-iot/binary-download",
+    );
+    expect(getAegisPatchDownloadUrl("aegis-web-shop")).toBe(
+      "/api/modules/aegis/projects/aegis-web-shop/patch-download",
+    );
+    expect(getAegisShieldProxyUrl("aegis-api-gateway", "/api/v1/webhooks/preview")).toBe(
+      "/api/modules/aegis/shield-proxy/aegis-api-gateway/api/v1/webhooks/preview",
+    );
+    expect(typeof streamAegisPipeline).toBe("function");
+    expect(typeof uploadAegisBinary).toBe("function");
+    expect(typeof createAegisGitHubPr).toBe("function");
+    expect(typeof updateAegisShieldRule).toBe("function");
+    expect(typeof polishAegisProject).toBe("function");
   });
 });

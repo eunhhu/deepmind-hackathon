@@ -480,3 +480,40 @@ export interface AegisShieldTestAttackResponse {
   latencyMs: number;
   project: AegisProject;
 }
+
+export interface AegisScanStreamEvent {
+  type: "stage_update" | "scan_complete";
+  stageIndex?: number;
+  step?: AegisTimelineStep;
+  project?: AegisProject;
+  interactionIds?: string[];
+  totalDurationMs?: number;
+}
+
+export interface AegisBinaryUploadRequest {
+  fileName: string;
+  format?: "ELF64" | "PE32+" | "Mach-O" | "APK";
+  base64Data: string;
+}
+
+export interface AegisUpdateShieldRuleRequest {
+  protectedPath?: string;
+  methods?: string[];
+  mitigationPattern?: string;
+  rateLimitPerMinute?: number;
+}
+
+export interface AegisCreatePrResponse {
+  projectId: string;
+  prUrl: string;
+  prBranch: string;
+  prNumber: number;
+  prTitle: string;
+  status: "ready_to_open" | "opened" | "merged";
+  patchFileUrl: string;
+  ghCliCommand: string;
+  project: AegisProject;
+}
+
+export type AegisPipelineStep = AegisTimelineStep;
+export type AegisGitPrReport = AegisGitHubPrReport;

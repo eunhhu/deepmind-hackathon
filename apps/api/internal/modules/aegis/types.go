@@ -259,3 +259,42 @@ type AegisShieldTestAttackResponse struct {
 	Project              AegisProject          `json:"project"`
 }
 
+// AegisScanStreamEvent is emitted over SSE during POST /projects/:id/scan/stream.
+type AegisScanStreamEvent struct {
+	Type            string             `json:"type"`
+	StageIndex      int                `json:"stageIndex,omitempty"`
+	Step            *AegisTimelineStep `json:"step,omitempty"`
+	Project         *AegisProject      `json:"project,omitempty"`
+	InteractionIds  []string           `json:"interactionIds,omitempty"`
+	TotalDurationMs int64              `json:"totalDurationMs,omitempty"`
+}
+
+// AegisBinaryUploadRequest accepts a raw binary (base64 encoded) for ELF/PE/Mach-O inspection and hot-patching.
+type AegisBinaryUploadRequest struct {
+	FileName   string `json:"fileName"`
+	Format     string `json:"format,omitempty"`
+	Base64Data string `json:"base64Data"`
+}
+
+// AegisUpdateShieldRuleRequest updates the active WAF regex and rate limit on a project's Route Shield.
+type AegisUpdateShieldRuleRequest struct {
+	ProtectedPath      string   `json:"protectedPath,omitempty"`
+	Methods            []string `json:"methods,omitempty"`
+	MitigationPattern  string   `json:"mitigationPattern,omitempty"`
+	RateLimitPerMinute int      `json:"rateLimitPerMinute,omitempty"`
+}
+
+// AegisCreatePrResponse returns the generated GitHub PR metadata and CLI/patch links.
+type AegisCreatePrResponse struct {
+	ProjectId    string       `json:"projectId"`
+	PrUrl        string       `json:"prUrl"`
+	PrBranch     string       `json:"prBranch"`
+	PrNumber     int          `json:"prNumber"`
+	PrTitle      string       `json:"prTitle"`
+	Status       string       `json:"status"`
+	PatchFileUrl string       `json:"patchFileUrl"`
+	GhCliCommand string       `json:"ghCliCommand"`
+	Project      AegisProject `json:"project"`
+}
+
+

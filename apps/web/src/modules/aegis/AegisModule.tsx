@@ -1,5 +1,6 @@
 import type {
   AegisIntakeMode,
+  AegisPipelineStep,
   AegisProject,
   AegisRemediationMode,
   AegisRunPipelineResponse,
@@ -11,11 +12,34 @@ import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { buildAuthHeaders } from "../../core/api/client";
 import { AegisPatchInsightPanel } from "./AegisPatchInsightPanel";
 
+interface AegisScanStreamEvent {
+  type: "stage_update" | "scan_complete" | "error";
+  stageIndex?: number;
+  step?: AegisPipelineStep;
+  project?: AegisProject;
+  interactionIds?: string[];
+  totalDurationMs?: number;
+  message?: string;
+}
+
 const DEFAULT_REMEDIATION_BY_MODE: Record<AegisIntakeMode, AegisRemediationMode> = {
   github: "git-pr",
   "url-dns": "route-shield",
   binary: "binary-patch",
 };
+
+function hexPreviewToBase64(hex: string): string {
+  const cleanTokens = hex
+    .trim()
+    .split(/\s+/)
+    .filter((token) => /^[0-9a-fA-F]{2}$/.test(token));
+  if (cleanTokens.length === 0) return "";
+  let binaryStr = "";
+  for (const token of cleanTokens) {
+    binaryStr += String.fromCharCode(Number.parseInt(token, 16));
+  }
+  return typeof btoa === "function" ? btoa(binaryStr) : "";
+}
 
 export function AegisModule() {
   const [projects, setProjects] = createSignal<AegisProject[]>([]);
@@ -24,6 +48,7 @@ export function AegisModule() {
   const [loading, setLoading] = createSignal<boolean>(false);
   const [runningPipeline, setRunningPipeline] = createSignal<boolean>(false);
   const [verifyingDns, setVerifyingDns] = createSignal<boolean>(false);
+  const [uploadingBinary, setUploadingBinary] = createSignal<boolean>(false);
   const [statusBanner, setStatusBanner] = createSignal<string | null>(null);
   const [errorBanner, setErrorBanner] = createSignal<string | null>(null);
   const [showIntakeForm, setShowIntakeForm] = createSignal<boolean>(false);
@@ -46,6 +71,7 @@ export function AegisModule() {
   const [intakeBinaryHexPreview, setIntakeBinaryHexPreview] = createSignal<string>(
     "7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 02 00 3e 00 01 00 00 00",
   );
+  const [binaryBase64Data, setBinaryBase64Data] = createSignal<string>("");
 
   const selectedProject = createMemo<AegisProject | undefined>(() => {
     const list = projects();
@@ -112,6 +138,29 @@ export function AegisModule() {
     setSelectedId(updated.id);
   }
 
+  function updateProjectTimelineStep(
+    projectId: string,
+    stageIndex: number,
+    step: AegisPipelineStep,
+  ) {
+    setProjects((prev) =>
+      prev.map((proj) => {
+        if (proj.id !== projectId) return proj;
+        const nextTimeline = proj.timeline.map((existing, idx) => {
+          if (idx === stageIndex) return step;
+          if (idx === stageIndex + 1 && existing.status === "pending") {
+            return { ...existing, status: "running" as const };
+          }
+          return existing;
+        });
+        return {
+          ...proj,
+          timeline: nextTimeline,
+        };
+      }),
+    );
+  }
+
   async function handleVerifyDns(project: AegisProject) {
     setVerifyingDns(true);
     setErrorBanner(null);
@@ -143,16 +192,107 @@ export function AegisModule() {
     }
   }
 
-  async function handleRunSelfHealingLoop(
-    project: AegisProject,
-    overrideMode?: AegisRemediationMode,
-  ) {
+  async function handleRunScan(project: AegisProject, overrideMode?: AegisRemediationMode) {
     setRunningPipeline(true);
     setErrorBanner(null);
     setStatusBanner(null);
     const remediationMode =
       overrideMode ?? project.remediationMode ?? DEFAULT_REMEDIATION_BY_MODE[project.intakeMode];
+
+    // Optimistically set stage 0 to "running" and stages 1..3 to "pending" for live progression
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== project.id) return p;
+        return {
+          ...p,
+          timeline: p.timeline.map((step, idx) => ({
+            ...step,
+            status: idx === 0 ? ("running" as const) : ("pending" as const),
+          })),
+        };
+      }),
+    );
+
     try {
+      const streamRes = await fetch(
+        `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/scan/stream`,
+        {
+          method: "POST",
+          headers: buildAuthHeaders({
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          }),
+          body: JSON.stringify({
+            projectId: project.id,
+            remediationMode,
+            dryRun: true,
+          }),
+        },
+      );
+
+      if (streamRes.ok && streamRes.body) {
+        const reader = streamRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let completedProject: AegisProject | null = null;
+        let streamedInteractions: string[] = [];
+        let streamedDurationMs = 0;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line.startsWith("data:")) continue;
+            const jsonStr = line.slice(5).trim();
+            if (!jsonStr || jsonStr === "[DONE]") continue;
+            try {
+              const event = JSON.parse(jsonStr) as AegisScanStreamEvent;
+              if (
+                event.type === "stage_update" &&
+                event.step !== undefined &&
+                typeof event.stageIndex === "number"
+              ) {
+                updateProjectTimelineStep(project.id, event.stageIndex, event.step);
+                await new Promise((resolve) => setTimeout(resolve, 140));
+              } else if (event.type === "scan_complete" && event.project) {
+                completedProject = event.project;
+                streamedInteractions = event.interactionIds ?? [];
+                streamedDurationMs = event.totalDurationMs ?? 0;
+                updateProjectInList(event.project);
+              } else if (event.type === "error" && event.message) {
+                throw new Error(event.message);
+              }
+            } catch (parseErr) {
+              if (parseErr instanceof Error && !(parseErr instanceof SyntaxError)) {
+                throw parseErr;
+              }
+            }
+          }
+        }
+
+        if (completedProject) {
+          const totalDuration =
+            streamedDurationMs ||
+            completedProject.timeline.reduce((acc, s) => acc + s.durationMs, 0);
+          const interactionInfo =
+            streamedInteractions.length > 0
+              ? `${streamedInteractions.length} Gemini interactions (${streamedInteractions.join(", ")})`
+              : "4 Gemini stage interactions";
+          const summaryText = `4-Stage Loop Verified in ${totalDuration}ms (${interactionInfo})`;
+          setLastPipelineSummary(summaryText);
+          setStatusBanner(
+            `4-Stage Self-Healing Stream Completed (${remediationMode}): ${summaryText}`,
+          );
+          return;
+        }
+      }
+
+      // Fallback to standard JSON /scan endpoint if /scan/stream is unavailable
       const res = await fetch(
         `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/scan?dryRun=true`,
         {
@@ -169,8 +309,12 @@ export function AegisModule() {
         throw new Error(`Self-healing loop request failed (HTTP ${res.status})`);
       }
       const data = (await res.json()) as AegisRunPipelineResponse;
+      for (let idx = 0; idx < data.project.timeline.length; idx += 1) {
+        updateProjectTimelineStep(project.id, idx, data.project.timeline[idx]);
+        await new Promise((resolve) => setTimeout(resolve, 140));
+      }
       updateProjectInList(data.project);
-      const summaryText = `4-Stage Loop Verified in ${data.totalDurationMs}ms (${data.interactionIds.length} Gemini interactions)`;
+      const summaryText = `4-Stage Loop Verified in ${data.totalDurationMs}ms (${data.interactionIds.length} Gemini interactions: ${data.interactionIds.join(", ")})`;
       setLastPipelineSummary(summaryText);
       setStatusBanner(`4-Stage Self-Healing Loop Completed (${remediationMode}): ${summaryText}`);
     } catch (err) {
@@ -236,12 +380,60 @@ export function AegisModule() {
     }
   }
 
+  async function uploadBinaryBytesToProject(
+    projectId: string,
+    fileName: string,
+    base64Data: string,
+  ): Promise<AegisProject | null> {
+    if (!base64Data) return null;
+    setUploadingBinary(true);
+    try {
+      const res = await fetch(
+        `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/binary-upload`,
+        {
+          method: "POST",
+          headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            fileName,
+            base64Data,
+          }),
+        },
+      );
+      if (!res.ok) return null;
+      const raw = (await res.json()) as { project?: AegisProject } & AegisProject;
+      const updated = raw.project ?? raw;
+      if (updated?.id) {
+        updateProjectInList(updated);
+        return updated;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      setUploadingBinary(false);
+    }
+  }
+
   async function handleBinaryFileChange(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
     setIntakeBinaryName(file.name);
     setIntakeBinarySize(file.size);
+
+    // Read full binary as base64 via FileReader for Go debug/elf, debug/pe, debug/macho & SHA-256 inspection
+    await new Promise<void>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = typeof reader.result === "string" ? reader.result : "";
+        const base64 = result.includes(",") ? (result.split(",")[1] ?? "") : result;
+        setBinaryBase64Data(base64);
+        resolve();
+      };
+      reader.onerror = () => resolve();
+      reader.readAsDataURL(file);
+    });
+
     try {
       const slice = file.slice(0, 32);
       const buffer = await slice.arrayBuffer();
@@ -253,12 +445,23 @@ export function AegisModule() {
     } catch {
       // Keep default hex preview on error
     }
+
+    const active = selectedProject();
+    if (!showIntakeForm() && active && active.intakeMode === "binary" && binaryBase64Data()) {
+      const updated = await uploadBinaryBytesToProject(active.id, file.name, binaryBase64Data());
+      if (updated) {
+        setStatusBanner(
+          `Uploaded binary "${file.name}" (${file.size.toLocaleString()} bytes) to "${updated.name}" — Go binary parser verified ${updated.binaryAnalysis?.format ?? "ELF/PE/Mach-O"} header & SHA-256.`,
+        );
+      }
+    }
   }
 
   function applyBinaryPreset(name: string, size: number, hex: string) {
     setIntakeBinaryName(name);
     setIntakeBinarySize(size);
     setIntakeBinaryHexPreview(hex);
+    setBinaryBase64Data(hexPreviewToBase64(hex));
   }
 
   async function handleCreateProject(e: SubmitEvent) {
@@ -285,11 +488,27 @@ export function AegisModule() {
       if (!res.ok) {
         throw new Error(`Failed to register target project (HTTP ${res.status})`);
       }
-      const created = (await res.json()) as AegisProject;
+      const raw = (await res.json()) as { project?: AegisProject } & AegisProject;
+      let created: AegisProject = raw.project ?? raw;
+
+      if (mode === "binary") {
+        const base64Payload = binaryBase64Data() || hexPreviewToBase64(intakeBinaryHexPreview());
+        if (base64Payload && created.id) {
+          const uploaded = await uploadBinaryBytesToProject(
+            created.id,
+            intakeBinaryName().trim() || created.binaryFileName || "artifact.elf",
+            base64Payload,
+          );
+          if (uploaded) {
+            created = uploaded;
+          }
+        }
+      }
+
       updateProjectInList(created);
       setShowIntakeForm(false);
       setStatusBanner(
-        `Registered new ${created.intakeMode.toUpperCase()} target "${created.name}".`,
+        `Registered new ${(created.intakeMode ?? mode).toUpperCase()} target "${created.name}".`,
       );
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : "Could not create target project");
@@ -439,11 +658,11 @@ export function AegisModule() {
                 <button
                   type="button"
                   disabled={runningPipeline()}
-                  onClick={() => void handleRunSelfHealingLoop(proj())}
+                  onClick={() => void handleRunScan(proj())}
                   class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
                 >
                   {runningPipeline()
-                    ? "⏳ Running 4-Stage Sandbox Loop..."
+                    ? "⏳ Streaming 4-Stage Sandbox Loop..."
                     : "⚡ Run Full 4-Stage Self-Healing Loop (Red → Green)"}
                 </button>
               )}
@@ -677,16 +896,34 @@ export function AegisModule() {
               <Show when={intakeMode() === "binary"}>
                 <div>
                   <label
+                    for="aegis-intake-binary-name"
+                    class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
+                  >
+                    Binary Artifact Filename (Preset or Custom)
+                  </label>
+                  <input
+                    id="aegis-intake-binary-name"
+                    type="text"
+                    value={intakeBinaryName()}
+                    onInput={(e) => setIntakeBinaryName(e.currentTarget.value)}
+                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
+                    placeholder="iot-gateway-daemon.elf"
+                  />
+                </div>
+                <div class="md:col-span-2">
+                  <label
                     for="aegis-intake-binary-file"
                     class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
                   >
-                    Upload Compiled Binary Artifact (ELF / PE / Mach-O)
+                    Upload Compiled Binary Artifact (ELF / PE / Mach-O — Read via FileReader Base64
+                    for Go `debug/elf`, `debug/pe`, `debug/macho` &amp; SHA-256 Inspection)
                   </label>
                   <input
                     id="aegis-intake-binary-file"
                     type="file"
+                    accept=".elf,.bin,.exe,.dll,.so,.dylib,.apk,application/octet-stream"
                     onChange={(e) => void handleBinaryFileChange(e)}
-                    class="py-1.5 px-3 block w-full border border-gray-200 rounded-lg text-sm dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
+                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
                   />
                 </div>
                 <div class="md:col-span-2 space-y-3 p-3.5 rounded-xl bg-gray-50 dark:bg-neutral-950 border border-gray-200 dark:border-neutral-800">
@@ -768,9 +1005,12 @@ export function AegisModule() {
               </button>
               <button
                 type="submit"
-                class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 cursor-pointer"
+                disabled={uploadingBinary()}
+                class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
               >
-                Register Target in AEGIS-4
+                {uploadingBinary()
+                  ? "Uploading & Inspecting Binary..."
+                  : "Register Target in AEGIS-4"}
               </button>
             </div>
           </form>
@@ -948,7 +1188,7 @@ export function AegisModule() {
                         disabled={runningPipeline()}
                         onClick={() => {
                           setSelectedId(proj.id);
-                          void handleRunSelfHealingLoop(proj);
+                          void handleRunScan(proj);
                         }}
                         class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 hover:bg-gray-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer"
                       >
@@ -1034,10 +1274,10 @@ export function AegisModule() {
         {(proj) => (
           <AegisPatchInsightPanel
             project={proj()}
-            busy={runningPipeline() || verifyingDns()}
+            busy={runningPipeline() || verifyingDns() || uploadingBinary()}
             onToggleShield={(enabled) => handleToggleShield(proj(), enabled)}
             onTestAttack={(payload) => handleTestAttack(proj(), payload)}
-            onRunScan={(mode) => handleRunSelfHealingLoop(proj(), mode)}
+            onRunScan={(mode) => handleRunScan(proj(), mode)}
           />
         )}
       </Show>

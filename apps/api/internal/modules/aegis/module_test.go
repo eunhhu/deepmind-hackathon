@@ -2,6 +2,9 @@ package aegis
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -246,4 +249,120 @@ func TestAegisPatchedBinaryDownload(t *testing.T) {
 	if !bytes.HasPrefix(payload, elfMagic) {
 		t.Fatalf("expected payload to start with \\x7fELF, got %x", payload[:4])
 	}
+
+	sum := sha256.Sum256(payload)
+	actualSha := hex.EncodeToString(sum[:])
+	headerShaAfter := w.Header().Get("X-Aegis-SHA256-After")
+	if headerShaAfter == "" || headerShaAfter != actualSha {
+		t.Fatalf("expected downloaded binary sha256 (%s) to match X-Aegis-SHA256-After (%s)", actualSha, headerShaAfter)
+	}
 }
+
+func TestAegisBinaryUploadAndCryptographicPatchMatch(t *testing.T) {
+	router := setupAegisTestRouter()
+
+	unpatched := BuildDefaultUnpatchedELF64("custom-edge-router.elf")
+	b64 := base64.StdEncoding.EncodeToString(unpatched)
+	uploadBody := `{"fileName":"custom-edge-router.elf","format":"ELF64","base64Data":"` + b64 + `"}`
+
+	reqUp := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-upload", bytes.NewBufferString(uploadBody))
+	reqUp.Header.Set("Content-Type", "application/json")
+	wUp := httptest.NewRecorder()
+	router.ServeHTTP(wUp, reqUp)
+
+	if wUp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from binary-upload, got %d: %s", wUp.Code, wUp.Body.String())
+	}
+
+	analysis := extractMap(t, wUp.Body.Bytes(), "binaryAnalysis")
+	shaBefore, _ := analysis["sha256Before"].(string)
+	shaAfter, _ := analysis["sha256After"].(string)
+	if shaBefore == "" || shaAfter == "" || shaBefore == shaAfter {
+		t.Fatalf("expected distinct non-empty sha256Before (%s) and sha256After (%s)", shaBefore, shaAfter)
+	}
+
+	reqDown := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-download", nil)
+	wDown := httptest.NewRecorder()
+	router.ServeHTTP(wDown, reqDown)
+
+	if wDown.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from binary-download after upload, got %d", wDown.Code)
+	}
+	dlSum := sha256.Sum256(wDown.Body.Bytes())
+	dlHex := hex.EncodeToString(dlSum[:])
+	if dlHex != shaAfter {
+		t.Fatalf("expected downloaded binary sha256 (%s) to match binaryAnalysis.sha256After (%s)", dlHex, shaAfter)
+	}
+}
+
+func TestAegisScanStreamSSEAndRemediationEndpoints(t *testing.T) {
+	router := setupAegisTestRouter()
+
+	// 1. Test SSE /scan/stream
+	reqStream := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/scan/stream?dryRun=true", bytes.NewBufferString(`{"remediationMode":"git-pr","dryRun":true}`))
+	reqStream.Header.Set("Content-Type", "application/json")
+	wStream := httptest.NewRecorder()
+	router.ServeHTTP(wStream, reqStream)
+
+	if wStream.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from scan/stream, got %d: %s", wStream.Code, wStream.Body.String())
+	}
+	sseOut := wStream.Body.String()
+	if !strings.Contains(sseOut, "event: stage_update") || !strings.Contains(sseOut, "event: scan_complete") {
+		t.Fatalf("expected SSE output to contain stage_update and scan_complete events, got: %s", sseOut)
+	}
+
+	// 2. Test GET /patch-download
+	reqPatch := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/aegis-whitebox-github/patch-download", nil)
+	wPatch := httptest.NewRecorder()
+	router.ServeHTTP(wPatch, reqPatch)
+	if wPatch.Code != http.StatusOK || !strings.Contains(wPatch.Body.String(), "diff --git") {
+		t.Fatalf("expected valid git format-patch from /patch-download, got %d: %s", wPatch.Code, wPatch.Body.String())
+	}
+
+	// 3. Test POST /create-pr
+	reqPR := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/create-pr", bytes.NewBufferString(`{}`))
+	wPR := httptest.NewRecorder()
+	router.ServeHTTP(wPR, reqPR)
+	if wPR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /create-pr, got %d: %s", wPR.Code, wPR.Body.String())
+	}
+	prMap := extractMap(t, wPR.Body.Bytes(), "")
+	if status, _ := prMap["status"].(string); status != "opened" {
+		t.Fatalf("expected status == opened from /create-pr, got %q", status)
+	}
+
+	// 4. Test POST /polish
+	reqPolish := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/polish", bytes.NewBufferString(`{}`))
+	wPolish := httptest.NewRecorder()
+	router.ServeHTTP(wPolish, reqPolish)
+	if wPolish.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /polish, got %d: %s", wPolish.Code, wPolish.Body.String())
+	}
+
+	// 5. Test PATCH /shield-rule and live /shield-proxy gateway
+	reqRule := httptest.NewRequest(http.MethodPatch, "/api/modules/aegis/projects/aegis-blackbox-url-shield/shield-rule", bytes.NewBufferString(`{"protectedPath":"/api/v1/webhooks/*","mitigationPattern":"(?i)(169\\.254\\.169\\.254|metadata\\.google\\.internal)","rateLimitPerMinute":90}`))
+	reqRule.Header.Set("Content-Type", "application/json")
+	wRule := httptest.NewRecorder()
+	router.ServeHTTP(wRule, reqRule)
+	if wRule.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from PATCH /shield-rule, got %d: %s", wRule.Code, wRule.Body.String())
+	}
+
+	reqProxyAttack := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/shield-proxy/aegis-blackbox-url-shield/api/v1/webhooks/preview", bytes.NewBufferString(`{"url":"http://169.254.169.254/computeMetadata/v1/"}`))
+	reqProxyAttack.Header.Set("Content-Type", "application/json")
+	wProxyAttack := httptest.NewRecorder()
+	router.ServeHTTP(wProxyAttack, reqProxyAttack)
+	if wProxyAttack.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden from live /shield-proxy on SSRF payload, got %d: %s", wProxyAttack.Code, wProxyAttack.Body.String())
+	}
+
+	reqProxyClean := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/shield-proxy/aegis-blackbox-url-shield/api/v1/webhooks/preview", bytes.NewBufferString(`{"url":"https://hooks.stripe.com/events/evt_123"}`))
+	reqProxyClean.Header.Set("Content-Type", "application/json")
+	wProxyClean := httptest.NewRecorder()
+	router.ServeHTTP(wProxyClean, reqProxyClean)
+	if wProxyClean.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from live /shield-proxy on clean payload, got %d: %s", wProxyClean.Code, wProxyClean.Body.String())
+	}
+}
+

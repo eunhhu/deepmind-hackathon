@@ -1,10 +1,17 @@
 import type {
+  AegisBinaryUploadRequest,
+  AegisCreatePrResponse,
+  AegisProject,
+  AegisRemediationMode,
+  AegisScanStreamEvent,
+  AegisUpdateShieldRuleRequest,
   AuthVerifyResponse,
   CreateEntityRequest,
   EntityRecord,
   FeatureModuleMeta,
   ListEntitiesResponse,
   UpdateEntityRequest,
+  VerifyCritiquePolishResponse,
   WorkspaceAiSynthesizeRequest,
   WorkspaceAiSynthesizeResponse,
   WorkspaceItemData,
@@ -186,4 +193,110 @@ export async function synthesizeWorkspaceItem(
     method: "POST",
     body: req,
   });
+}
+
+export function getAegisBinaryDownloadUrl(projectId: string): string {
+  return `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/binary-download`;
+}
+
+export function getAegisPatchDownloadUrl(projectId: string): string {
+  return `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/patch-download`;
+}
+
+export function getAegisShieldProxyUrl(
+  projectId: string,
+  proxyPath = "/api/v1/webhooks/preview",
+): string {
+  const normalized = proxyPath.startsWith("/") ? proxyPath : `/${proxyPath}`;
+  return `/api/modules/aegis/shield-proxy/${encodeURIComponent(projectId)}${normalized}`;
+}
+
+export async function streamAegisPipeline(
+  projectId: string,
+  remediationMode: AegisRemediationMode | undefined,
+  dryRun: boolean,
+  onEvent: (evt: AegisScanStreamEvent) => void,
+): Promise<void> {
+  const res = await fetch(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/scan/stream`,
+    {
+      method: "POST",
+      headers: buildAuthHeaders(),
+      body: JSON.stringify({ projectId, remediationMode, dryRun }),
+    },
+  );
+  if (!res.ok || !res.body) {
+    throw new Error(`SSE stream failed (${res.status})`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const dataLine = frame
+        .split("\n")
+        .find((line) => line.startsWith("data:"))
+        ?.slice(5)
+        .trim();
+      if (dataLine) {
+        onEvent(JSON.parse(dataLine) as AegisScanStreamEvent);
+      }
+    }
+  }
+}
+
+export async function uploadAegisBinary(
+  projectId: string,
+  req: AegisBinaryUploadRequest,
+): Promise<AegisProject> {
+  const raw = await apiRequest<{ project?: AegisProject } & AegisProject>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/binary-upload`,
+    {
+      method: "POST",
+      body: req,
+    },
+  );
+  return raw.project ?? raw;
+}
+
+export async function createAegisGitHubPr(projectId: string): Promise<AegisCreatePrResponse> {
+  return apiRequest<AegisCreatePrResponse>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/create-pr`,
+    {
+      method: "POST",
+      body: {},
+    },
+  );
+}
+
+export async function updateAegisShieldRule(
+  projectId: string,
+  req: AegisUpdateShieldRuleRequest,
+): Promise<AegisProject> {
+  const raw = await apiRequest<{ project?: AegisProject } & AegisProject>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/shield-rule`,
+    {
+      method: "PATCH",
+      body: req,
+    },
+  );
+  return raw.project ?? raw;
+}
+
+export async function polishAegisProject(
+  projectId: string,
+  dryRun = true,
+): Promise<VerifyCritiquePolishResponse & { project?: AegisProject }> {
+  return apiRequest<VerifyCritiquePolishResponse & { project?: AegisProject }>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/polish?dryRun=${dryRun ? "true" : "false"}`,
+    {
+      method: "POST",
+      body: {},
+    },
+  );
 }
