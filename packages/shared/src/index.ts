@@ -219,3 +219,62 @@ export interface WorkspaceAiSynthesizeResponse {
   interactionId: string;
   durationMs: number;
 }
+
+// ============================================================================
+// 5. Dynamic Effort Routing & Automated Verify-Critique-Polish Contracts
+// ============================================================================
+
+export type EffortTier =
+  | "instant-flash-lite" // gemini-3.5-flash-lite (thinking_level: low, maxOutputTokens: 16384)
+  | "fast-flash" // gemini-3.8-flash (thinking_level: low, maxOutputTokens: 32768)
+  | "parallel-argon-low" // gemini-4-argon (thinking_level: low, maxOutputTokens: 32768)
+  | "balanced-argon-med" // gemini-4-argon (thinking_level: medium, maxOutputTokens: 65536)
+  | "deep-argon-high" // gemini-4-argon (thinking_level: high, maxOutputTokens: 65536)
+  | "long-decode-argon" // gemini-4-argon (thinking_level: high, maxOutputTokens: 262144, background: true)
+  | "autonomous-sandbox"; // antigravity-preview-09-2026 (remote Linux sandbox)
+
+export type TaskComplexityHint =
+  | "trivial"
+  | "fast"
+  | "standard"
+  | "complex"
+  | "extreme"
+  | "sandbox";
+
+export interface EffortRouteDecision {
+  tier: EffortTier;
+  model: ArgonModelId;
+  thinkingLevel: ArgonThinkingLevel;
+  maxOutputTokens: number;
+  background: boolean;
+  useManagedAgent: boolean;
+  rationale: string;
+}
+
+export interface VerifyCritiquePolishRequest {
+  artifactTitle: string;
+  artifactType: "ui-preline" | "api-go-gin" | "agent-unit" | "full-feature";
+  draftContent: string;
+  requirements?: string;
+  sharedContext?: string;
+  dryRun?: boolean;
+}
+
+export interface CritiqueRubricItem {
+  dimension: string;
+  score: number; // 1..10
+  issue: string;
+  fixApplied: string;
+}
+
+export interface VerifyCritiquePolishResponse {
+  artifactTitle: string;
+  routeUsed: EffortRouteDecision;
+  parallelDraftsCount: number;
+  initialScore: number;
+  finalScore: number;
+  critiqueItems: CritiqueRubricItem[];
+  polishedOutput: string;
+  totalDurationMs: number;
+  steps: ParallelTaskResult[];
+}

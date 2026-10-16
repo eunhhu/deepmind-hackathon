@@ -11,8 +11,10 @@ import (
 	"deepmind/api/internal/argon"
 	"deepmind/api/internal/auth"
 	"deepmind/api/internal/modules"
+	"deepmind/api/internal/modules/pipeline"
 	"deepmind/api/internal/modules/workspace"
 	"deepmind/api/internal/store"
+
 
 	"github.com/gin-gonic/gin"
 )
@@ -165,11 +167,13 @@ func buildRouter(client *argon.Client, verifier *auth.Verifier, storeInstance st
 	// Plug-and-play backend feature modules registry
 	reg := modules.NewRegistry()
 	reg.Register(workspace.New())
+	reg.Register(pipeline.NewModule())
 	reg.Mount(r, &modules.Dependencies{
 		Argon:    client,
 		Store:    storeInstance,
 		Verifier: verifier,
 	})
+
 
 	r.POST("/api/swarm/run", func(c *gin.Context) {
 		var req argon.ParallelSwarmRequest

@@ -6,6 +6,8 @@ import {
   defineAgentUnit,
   extractFullText,
   extractSteps,
+  routeTaskEffort,
+  runVerifyCritiquePolishPipeline,
   workspaceSynthesizerUnit,
 } from "./index";
 
@@ -201,5 +203,34 @@ describe("AgentUnitRegistry & workspace-synthesizer unit", () => {
     expect(parallelResults[1]?.status).toBe("completed");
     expect(parallelResults[0]?.structuredOutput).toBeDefined();
     expect(parallelResults[1]?.structuredOutput).toBeDefined();
+  });
+
+  it("routes task effort across tiers and runs Verify-Critique-Polish pipeline in dryRun mode", async () => {
+    const trivial = routeTaskEffort({ prompt: "Classify tag", complexityHint: "trivial" });
+    expect(trivial.tier).toBe("instant-flash-lite");
+    expect(trivial.model).toBe("gemini-3.5-flash-lite");
+
+    const sandbox = routeTaskEffort({ prompt: "Run container tests", requiresSandbox: true });
+    expect(sandbox.tier).toBe("autonomous-sandbox");
+    expect(sandbox.useManagedAgent).toBe(true);
+
+    const longDecode = routeTaskEffort({
+      prompt: "Generate full 200K spec",
+      requiresLongDecode: true,
+    });
+    expect(longDecode.tier).toBe("long-decode-argon");
+    expect(longDecode.background).toBe(true);
+
+    const orchestrator = new ArgonParallelOrchestrator();
+    const polishRes = await runVerifyCritiquePolishPipeline(orchestrator, {
+      artifactTitle: "Preline Dashboard Card",
+      artifactType: "ui-preline",
+      draftContent: "<div class='p-4'>Draft Card</div>",
+      dryRun: true,
+    });
+
+    expect(polishRes.finalScore).toBeGreaterThan(polishRes.initialScore);
+    expect(polishRes.critiqueItems.length).toBeGreaterThanOrEqual(3);
+    expect(polishRes.polishedOutput).toContain("Draft Card");
   });
 });

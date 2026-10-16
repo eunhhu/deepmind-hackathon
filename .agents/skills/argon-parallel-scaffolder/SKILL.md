@@ -1,53 +1,70 @@
 ---
 name: argon-parallel-scaffolder
-description: Use this skill when scaffolding or building full-stack monorepo features in parallel using Antigravity subagents and the Gemini 4 Argon (`gemini-4-argon`) parallel Interactions API engine.
+description: Use this skill when scaffolding or building full-stack monorepo features in parallel using Antigravity subagents, Preline UI (preline.co), Dynamic Effort Routing, and the Gemini 4 Argon (`gemini-4-argon`) parallel Interactions API engine.
 ---
 
-# Gemini 4 Argon 4-Hour Hackathon Hyper-Parallel Scaffolder
+# Gemini 4 Argon Unlimited-Credit Hyper-Speed Parallel Pipeline
 
-Use this runbook to turn any hackathon idea into a tested, deployed full-stack product in minutes using **parallel Antigravity subagents** + **pre-wired Firebase Auth (`h2gdm-hack26icn-2693`) + Cloud Firestore (`asia-northeast3`) + Gemini 4 Argon (`gemini-4-argon`)**.
-
----
-
-## 1. Pre-Built Infrastructure You Already Have
-
-1. **Authentication (`Firebase Identity Platform` + `Demo Auth`)**:
-   - Frontend: `useAuth()` in `apps/web/src/core/auth/firebaseAuth.ts` & `<AuthBar />` (supports 1-click Live Firebase Anonymous JWT, Email/Password JWT, and 0ms Demo User).
-   - Backend: `auth.AuthMiddleware` & `auth.CurrentUser(c)` in `apps/api/internal/auth/firebase.go` (verifies RS256 Google SecureToken JWTs for `h2gdm-hack26icn-2693` + `X-Demo-User` header).
-2. **Database (`Cloud Firestore Native` + `In-Memory Dual Store`)**:
-   - Instant Zero-Code CRUD from Frontend: `listEntities(col)`, `createEntity(col, data)`, `updateEntity(col, id, patch)`, `deleteEntity(col, id)` in `apps/web/src/core/api/client.ts` backed by `/api/db/:collection`.
-   - Backend Go Store: `deps.Store.Put/Get/Update/Delete/List` in `apps/api/internal/store/store.go` (uses Cloud Firestore Native REST in `asia-northeast3` on Cloud Run via ADC, or thread-safe `MemoryStore` locally/in tests).
-3. **Plug-and-Play Module Registries (Zero Conflict Routing)**:
-   - **AI Agent Units**: `packages/argon-orchestrator/src/units/<unit>.ts` registered in `AgentUnitRegistry`.
-   - **Backend Go Modules**: `apps/api/internal/modules/<unit>/module.go` implementing `modules.Module` (`RegisterRoutes(rg *gin.RouterGroup, deps *modules.Dependencies)`), mounted automatically at `/api/modules/<unit>`.
-   - **Frontend SolidJS Modules**: `apps/web/src/modules/<unit>/<Unit>Module.tsx` registered in `apps/web/src/modules/registry.ts`, rendered automatically as a top-level tab in `App.tsx`.
+Use this runbook to execute any hackathon feature request at maximum speed without sacrificing quality.
 
 ---
 
-## 2. Step-by-Step 4-Hour Hackathon Execution Protocol
+## 1. The 4-Stage Hyper-Speed Pipeline
 
-When the user gives you an idea (e.g., *"Let's build an AI Incident War-Room with Log Triage, Root-Cause Graph, and Auto-Patch Generator"*):
-
-### Step 1: Lock Shared Contracts (`packages/shared/src/index.ts`) — ~60 seconds
-Add the domain interfaces (`IncidentRecord`, `TriageRequest`, `TriageResponse`, etc.) directly to `packages/shared/src/index.ts`.
-
-### Step 2: Single-Call Parallel Subagent Fan-Out (`invoke_subagent`) — ~3 minutes
-Spawn subagents concurrently in **one `invoke_subagent` call** with `Model: "inherit"`:
-
-- **Subagent 1 (`agent-pipeline-worker`)**:
-  - Owns `packages/argon-orchestrator/src/units/<unit>.ts` and `packages/argon-orchestrator/src/index.test.ts`.
-  - Defines the `gemini-4-argon` prompt & output parser using `defineAgentUnit`.
-- **Subagent 2 (`backend-worker`)**:
-  - Owns `apps/api/internal/modules/<unit>/module.go` and `apps/api/internal/modules/<unit>/module_test.go`.
-  - Implements REST/SSE endpoints using `deps.Store` (Firestore/Memory) and `deps.Argon` (`gemini-4-argon`), registers the module in `apps/api/cmd/server/main.go`, and runs `go test -v -race ./...`.
-- **Subagent 3 (`frontend-worker`)**:
-  - Owns `apps/web/src/modules/<unit>/<Unit>Module.tsx`.
-  - Builds the reactive SolidJS UI using `apiClient` and `useAuth()`, registers the module in `apps/web/src/modules/registry.ts`, and runs `bun run typecheck && bun test`.
-
-### Step 3: Verify & Ship to Cloud Run — ~60 seconds
-Run from the repo root:
-```bash
-bun run check && bun run typecheck && bun run test:all
-git add -A && git commit -m "feat: add <unit> module" && git push origin main
 ```
-GitHub Actions CI + Cloud Run CD (`.github/workflows/cd-gcp.yml`) will automatically build and deploy both `argon-api` and `argon-web` to `asia-northeast3`.
+[Stage 0: Contract Lock (15s)]
+   └─ Lead Agent updates `packages/shared/src/index.ts`
+
+[Stage 1: 1-File Micro-Sharding Wave (30–45s)]
+   ├─ micro-coder #1 ──► packages/argon-orchestrator/src/units/<unit>.ts
+   ├─ micro-coder #2 ──► packages/argon-orchestrator/src/units/<unit>.test.ts
+   ├─ micro-coder #3 ──► apps/api/internal/modules/<unit>/module.go
+   ├─ micro-coder #4 ──► apps/api/internal/modules/<unit>/module_test.go
+   ├─ preline-ui-specialist #1 ──► apps/web/src/modules/<unit>/<Unit>Module.tsx
+   └─ preline-ui-specialist #2 ──► apps/web/src/modules/<unit>/<Unit>SubView.tsx
+
+[Stage 2: 25s Watchdog & Live Steering]
+   └─ `schedule(DurationSeconds=25, TimerCondition="any")` + `manage_subagents(Action="list")`
+      ├─ Steer slow subagent via `send_message` ("Skip reads, write file now")
+      └─ Or spawn helper `micro-coder` to steal remaining test/wiring file
+
+[Stage 3: Verify → Critique → Polish ("검증/검수 후 깎기") (20s)]
+   └─ Run `bun run check && bun run typecheck && bun run test:all` + `critic-polisher` pass
+```
+
+---
+
+## 2. Subagent Prompt Template (Zero-Exploration / Turn-1 Write)
+
+Always structure subagent prompts so they write code on **Turn 1**:
+
+```markdown
+ZERO-LATENCY RULE: DO NOT read any files first. Call `write_to_file` on your VERY FIRST turn to create `<AbsolutePath>`.
+
+### Inline Contract & Available Imports:
+```ts
+// Paste exact 10-20 lines of types/imports here
+```
+
+### Implementation Spec:
+- Use Preline UI (`preline.co`) primitives from `../../core/ui/preline` (`PrelineCard`, `PrelineButton`, `PrelineBadge`, `PrelineInput`, `PrelineSelect`).
+- ...
+```
+
+---
+
+## 3. Preline UI (`preline.co`) Quick Reference (`apps/web/src/core/ui/preline.tsx`)
+
+Import ready-made Preline primitives in any SolidJS module:
+```tsx
+import {
+  PrelineAlert,
+  PrelineBadge,
+  PrelineButton,
+  PrelineCard,
+  PrelineInput,
+  PrelineSelect,
+  PrelineStatCard,
+  PrelineTextarea,
+} from "../../core/ui/preline";
+```

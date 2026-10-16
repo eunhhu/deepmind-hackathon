@@ -21,9 +21,55 @@ import { useAuth } from "../../core/auth/firebaseAuth";
 
 const STATUS_ORDER: WorkspaceItemStatus[] = ["todo", "in_progress", "done"];
 
+const CATEGORY_OPTIONS = [
+  "Architecture",
+  "Agent Unit",
+  "Firestore & Storage",
+  "Preline UI / Frontend",
+  "Security & Auth",
+  "General",
+] as const;
+
+const QUICK_COLLECTIONS = ["ideas", "users", "metrics", "audit_logs"] as const;
+
 function nextStatus(current: WorkspaceItemStatus): WorkspaceItemStatus {
   const idx = STATUS_ORDER.indexOf(current);
   return STATUS_ORDER[(idx + 1) % STATUS_ORDER.length] ?? "todo";
+}
+
+function statusLabel(status: WorkspaceItemStatus | "all"): string {
+  switch (status) {
+    case "all":
+      return "All";
+    case "todo":
+      return "To Do";
+    case "in_progress":
+      return "In Progress";
+    case "done":
+      return "Done";
+  }
+}
+
+function statusBadgeClass(status: WorkspaceItemStatus | undefined): string {
+  switch (status) {
+    case "done":
+      return "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 hover:bg-teal-200 dark:bg-teal-800/30 dark:text-teal-400 dark:hover:bg-teal-800/50 cursor-pointer transition-colors";
+    case "in_progress":
+      return "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-800/30 dark:text-amber-400 dark:hover:bg-amber-800/50 cursor-pointer transition-colors";
+    default:
+      return "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 hover:bg-gray-200 dark:bg-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-700 cursor-pointer transition-colors";
+  }
+}
+
+function statusDotClass(status: WorkspaceItemStatus | undefined): string {
+  switch (status) {
+    case "done":
+      return "size-1.5 inline-block rounded-full bg-teal-800 dark:bg-teal-400";
+    case "in_progress":
+      return "size-1.5 inline-block rounded-full bg-amber-800 dark:bg-amber-400";
+    default:
+      return "size-1.5 inline-block rounded-full bg-gray-600 dark:bg-neutral-400";
+  }
 }
 
 export function WorkspaceModule() {
@@ -46,6 +92,7 @@ export function WorkspaceModule() {
   );
   const [draftTags, setDraftTags] = createSignal<string>("gemini-4-argon, firestore, solidjs");
   const [draftAiSummary, setDraftAiSummary] = createSignal<string>("");
+  const [draftSuggestedTags, setDraftSuggestedTags] = createSignal<string[]>([]);
   const [thinkingLevel, setThinkingLevel] = createSignal<ArgonThinkingLevel>("high");
   const [dryRunAi, setDryRunAi] = createSignal<boolean>(true);
   const [synthesizingId, setSynthesizingId] = createSignal<string | null>(null);
@@ -61,6 +108,7 @@ export function WorkspaceModule() {
     '{\n  "name": "Zero-VDOM Agent Telemetry",\n  "priority": "P0",\n  "score": 98\n}',
   );
   const [loadingCustom, setLoadingCustom] = createSignal<boolean>(false);
+  const [inspectorOpen, setInspectorOpen] = createSignal<boolean>(true);
 
   const loadWorkspace = async () => {
     setLoadingItems(true);
@@ -108,6 +156,16 @@ export function WorkspaceModule() {
     return items().filter((item) => item.data?.status === status);
   });
 
+  const inProgressCount = createMemo(
+    () => items().filter((item) => item.data?.status === "in_progress").length,
+  );
+
+  const completedCount = createMemo(
+    () => items().filter((item) => item.data?.status === "done").length,
+  );
+
+  const activeUserUid = createMemo(() => auth.user()?.uid ?? "anonymous");
+
   const handleCreateItem = async () => {
     if (!draftTitle().trim()) return;
     setErrorMessage(null);
@@ -131,6 +189,7 @@ export function WorkspaceModule() {
       setDraftTitle("");
       setDraftDescription("");
       setDraftAiSummary("");
+      setDraftSuggestedTags([]);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     }
@@ -150,6 +209,7 @@ export function WorkspaceModule() {
       setLastSynthMeta(res);
       setDraftAiSummary(res.aiSummary);
       if (res.suggestedTags && res.suggestedTags.length > 0) {
+        setDraftSuggestedTags(res.suggestedTags);
         setDraftTags(res.suggestedTags.join(", "));
       }
     } catch (err) {
@@ -244,314 +304,630 @@ export function WorkspaceModule() {
     }
   };
 
+  const handleSelectQuickCollection = (col: string) => {
+    setCustomCollection(col);
+    void loadCustomCollection();
+  };
+
   return (
-    <div class="module-container">
-      <Show when={errorMessage()}>{(msg) => <div class="error-banner">{msg()}</div>}</Show>
-
-      <div class="workspace-grid">
-        {/* Left Column: Create + Gemini 4 Argon Synthesis */}
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Create &amp; Synthesize Workspace Entity</h2>
-            <span class="pill">
-              Store: <strong>{storeBackend()}</strong>
-            </span>
-          </div>
-
-          <label class="field-label">
-            <span>Feature / Task Title</span>
-            <input
-              type="text"
-              class="input"
-              value={draftTitle()}
-              onInput={(e) => setDraftTitle(e.currentTarget.value)}
-              placeholder="e.g., Real-time Multi-Agent RAG Pipeline"
-            />
-          </label>
-
-          <div class="control-grid">
-            <label class="field-label">
-              <span>Category</span>
-              <input
-                type="text"
-                class="input"
-                value={draftCategory()}
-                onInput={(e) => setDraftCategory(e.currentTarget.value)}
-                placeholder="Architecture / UI / Agent"
-              />
-            </label>
-
-            <label class="field-label">
-              <span>Argon Thinking Level</span>
-              <select
-                class="select"
-                value={thinkingLevel()}
-                onChange={(e) => setThinkingLevel(e.currentTarget.value as ArgonThinkingLevel)}
-              >
-                <option value="low">low (Fast synthesis)</option>
-                <option value="medium">medium (Balanced)</option>
-                <option value="high">high (Deep architecture)</option>
-              </select>
-            </label>
-          </div>
-
-          <label class="field-label">
-            <span>Detailed Specification / Context</span>
-            <textarea
-              class="textarea"
-              value={draftDescription()}
-              onInput={(e) => setDraftDescription(e.currentTarget.value)}
-              placeholder="Describe the feature unit, data schema, or agent objective..."
-            />
-          </label>
-
-          <label class="field-label">
-            <span>Tags (comma-separated)</span>
-            <input
-              type="text"
-              class="input"
-              value={draftTags()}
-              onInput={(e) => setDraftTags(e.currentTarget.value)}
-              placeholder="gemini-4-argon, firestore, hackathon"
-            />
-          </label>
-
-          <Show when={draftAiSummary()}>
-            <div class="ai-summary-box">
-              <div class="ai-summary-header">
-                <span>✨ Gemini 4 Argon Executive Synthesis</span>
-                <Show when={lastSynthMeta()}>
-                  {(meta) => (
-                    <span class="ai-meta-tag">
-                      {meta().interactionId} &bull; {meta().durationMs}ms
-                    </span>
-                  )}
-                </Show>
-              </div>
-              <p>{draftAiSummary()}</p>
-            </div>
-          </Show>
-
-          <label class="checkbox-row">
-            <input
-              type="checkbox"
-              checked={dryRunAi()}
-              onChange={(e) => setDryRunAi(e.currentTarget.checked)}
-            />
-            <span>Dry-Run AI Synthesis (Instant zero-latency mock when offline)</span>
-          </label>
-
-          <div class="action-bar">
-            <button
-              type="button"
-              class="btn btn-primary"
-              disabled={!draftTitle().trim()}
-              onClick={handleCreateItem}
-            >
-              💾 Save to Firestore / Store
-            </button>
-
-            <button
-              type="button"
-              class="btn btn-secondary"
-              disabled={!draftTitle().trim() || synthesizingId() === "draft"}
-              onClick={handleSynthesizeDraft}
-            >
-              {synthesizingId() === "draft"
-                ? "✨ Synthesizing..."
-                : "✨ Synthesize with Gemini 4 Argon"}
-            </button>
-          </div>
-
-          {/* Generic Firestore Collection Inspector */}
-          <div class="inspector-divider" />
-
-          <div class="panel-header">
-            <h2>🗄️ Generic Firestore Collection Inspector (/api/db/:collection)</h2>
-            <span class="pill">
-              Backend: <strong>{customBackend()}</strong>
-            </span>
-          </div>
-
-          <div class="inspector-bar">
-            <label class="field-label inspector-col-input">
-              <span>Collection Name</span>
-              <input
-                type="text"
-                class="input"
-                value={customCollection()}
-                onInput={(e) => setCustomCollection(e.currentTarget.value)}
-                placeholder="ideas, users, metrics..."
-              />
-            </label>
-            <button
-              type="button"
-              class="btn btn-secondary"
-              disabled={loadingCustom()}
-              onClick={loadCustomCollection}
-            >
-              {loadingCustom() ? "Loading..." : "Fetch Docs"}
-            </button>
-          </div>
-
-          <label class="field-label">
-            <span>JSON Document Payload</span>
-            <textarea
-              class="textarea"
-              value={customJsonInput()}
-              onInput={(e) => setCustomJsonInput(e.currentTarget.value)}
-            />
-          </label>
-
-          <button type="button" class="btn btn-secondary" onClick={handleCreateCustomDoc}>
-            + Insert JSON Document into /api/db/{customCollection().trim() || "collection"}
-          </button>
-
-          <div class="custom-docs-list">
-            <For each={customDocs()}>
-              {(doc) => (
-                <div class="custom-doc-card">
-                  <div class="custom-doc-header">
-                    <span class="task-id-tag">
-                      {doc.collection}/{doc.id}
-                    </span>
-                    <span class="result-meta">owner: {doc.ownerUid}</span>
-                    <button
-                      type="button"
-                      class="btn btn-ghost"
-                      onClick={() => handleDeleteCustomDoc(doc.id)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                  <pre class="output-pre compact-pre">{JSON.stringify(doc.data, null, 2)}</pre>
-                </div>
-              )}
-            </For>
-          </div>
-        </section>
-
-        {/* Right Column: Live Workspace Items Board */}
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <h2>Workspace Entities ({filteredItems().length})</h2>
-              <p class="brand-subtitle">
-                Backed by <code>/api/modules/workspace/items</code> &amp;{" "}
-                <code>workspace-synthesizer</code> Agent Unit
-              </p>
-            </div>
-
-            <div class="filter-pills">
-              <For each={["all", "todo", "in_progress", "done"] as const}>
-                {(st) => (
-                  <button
-                    type="button"
-                    class={`btn btn-ghost ${filterStatus() === st ? "filter-active" : ""}`}
-                    onClick={() => setFilterStatus(st)}
-                  >
-                    {st}
-                  </button>
-                )}
-              </For>
-              <button
-                type="button"
-                class="btn btn-ghost"
-                disabled={loadingItems()}
-                onClick={loadWorkspace}
-              >
-                ↻ Refresh
-              </button>
-            </div>
-          </div>
-
-          <Show
-            when={filteredItems().length > 0}
-            fallback={
-              <div class="empty-state">
-                No workspace items found for filter <strong>{filterStatus()}</strong>. Create an
-                item on the left to persist it to Cloud Firestore / Memory Store!
-              </div>
-            }
+    <div class="space-y-6">
+      {/* Error Alert Banner */}
+      <Show when={errorMessage()}>
+        {(msg) => (
+          <div
+            class="bg-red-50 border border-red-200 text-sm text-red-800 rounded-xl p-4 dark:bg-red-800/10 dark:border-red-900 dark:text-red-400 flex items-center justify-between gap-x-3"
+            role="alert"
           >
-            <div class="results-grid">
-              <For each={filteredItems()}>
-                {(record) => (
-                  <article class="result-card">
-                    <div class="result-card-header">
-                      <div>
-                        <div class="result-title">{record.data?.title}</div>
-                        <div class="result-meta">
-                          <span>ID: {record.id}</span>
-                          <span>Category: {record.data?.category || "General"}</span>
-                          <span>Owner: {record.ownerUid}</span>
-                        </div>
-                      </div>
+            <div class="flex items-center gap-x-2">
+              <span class="font-semibold">Error:</span>
+              <span>{msg()}</span>
+            </div>
+            <button
+              type="button"
+              class="py-1 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-red-100 text-red-800 hover:bg-red-200 dark:bg-red-800/30 dark:text-red-400 dark:hover:bg-red-800/50 cursor-pointer transition-colors"
+              onClick={() => setErrorMessage(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+      </Show>
 
-                      <button
-                        type="button"
-                        class={`status-badge status-btn status-${
-                          record.data?.status === "done"
-                            ? "completed"
-                            : record.data?.status === "in_progress"
-                              ? "in_progress"
-                              : "queued"
-                        }`}
-                        title="Click to cycle status (todo -> in_progress -> done)"
-                        onClick={() => handleToggleStatus(record)}
-                      >
-                        {record.data?.status || "todo"} ↻
-                      </button>
-                    </div>
+      {/* 1. Top KPI Row */}
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Total Workspace Items */}
+        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
+          <div class="flex items-center justify-between gap-x-2">
+            <p class="text-xs uppercase tracking-wide font-semibold text-gray-500 dark:text-neutral-400">
+              Total Workspace Items
+            </p>
+            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
+              All Entities
+            </span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-x-2">
+            <h3 class="text-2xl sm:text-3xl font-bold text-gray-800 dark:text-neutral-100">
+              {items().length}
+            </h3>
+            <span class="text-xs text-gray-500 dark:text-neutral-400">
+              /api/modules/workspace/items
+            </span>
+          </div>
+        </div>
 
-                    <p class="item-description">{record.data?.description}</p>
+        {/* In-Progress Count */}
+        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
+          <div class="flex items-center justify-between gap-x-2">
+            <p class="text-xs uppercase tracking-wide font-semibold text-gray-500 dark:text-neutral-400">
+              In-Progress Count
+            </p>
+            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
+              Active
+            </span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-x-2">
+            <h3 class="text-2xl sm:text-3xl font-bold text-gray-800 dark:text-neutral-100">
+              {inProgressCount()}
+            </h3>
+            <span class="text-xs text-gray-500 dark:text-neutral-400">status: in_progress</span>
+          </div>
+        </div>
 
-                    <Show when={record.data?.aiSummary}>
-                      {(summary) => (
-                        <div class="ai-summary-box">
-                          <div class="ai-summary-header">
-                            <span>✨ Gemini 4 Argon Executive Summary</span>
-                          </div>
-                          <p>{summary()}</p>
-                        </div>
+        {/* Completed Count */}
+        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
+          <div class="flex items-center justify-between gap-x-2">
+            <p class="text-xs uppercase tracking-wide font-semibold text-gray-500 dark:text-neutral-400">
+              Completed Count
+            </p>
+            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
+              Done
+            </span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-x-2">
+            <h3 class="text-2xl sm:text-3xl font-bold text-gray-800 dark:text-neutral-100">
+              {completedCount()}
+            </h3>
+            <span class="text-xs text-gray-500 dark:text-neutral-400">status: done</span>
+          </div>
+        </div>
+
+        {/* Active Auth User & Store Backend */}
+        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
+          <div class="flex items-center justify-between gap-x-2">
+            <p class="text-xs uppercase tracking-wide font-semibold text-gray-500 dark:text-neutral-400">
+              Auth User &amp; Backend
+            </p>
+            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
+              {storeBackend()}
+            </span>
+          </div>
+          <div class="mt-2 flex flex-col gap-y-0.5">
+            <span
+              class="text-sm font-semibold text-gray-800 dark:text-neutral-100 truncate"
+              title={activeUserUid()}
+            >
+              UID: {activeUserUid()}
+            </span>
+            <span class="text-xs text-gray-500 dark:text-neutral-400">
+              Store Backend: <strong class="font-medium">{storeBackend()}</strong>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Two-Column Main Layout */}
+      <div class="grid lg:grid-cols-12 gap-6">
+        {/* Left Column (lg:col-span-4): Create & Synthesize Item */}
+        <div class="lg:col-span-4">
+          <section class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
+            <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex items-center justify-between gap-x-3">
+              <div>
+                <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-100">
+                  Create &amp; Synthesize Item
+                </h2>
+                <p class="text-xs text-gray-500 dark:text-neutral-400">
+                  Persist entities &amp; run Gemini 4 Argon synthesis
+                </p>
+              </div>
+              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
+                {storeBackend()}
+              </span>
+            </div>
+
+            <div class="p-4 md:p-5 space-y-4">
+              {/* Title */}
+              <div>
+                <label
+                  for="workspace-draft-title"
+                  class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                >
+                  Title
+                </label>
+                <input
+                  id="workspace-draft-title"
+                  type="text"
+                  class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
+                  value={draftTitle()}
+                  onInput={(e) => setDraftTitle(e.currentTarget.value)}
+                  placeholder="e.g., Autonomous Multi-Agent Firestore Sync Pipeline"
+                />
+              </div>
+
+              {/* Category Select & Argon Thinking Level */}
+              <div class="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label
+                    for="workspace-draft-category"
+                    class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                  >
+                    Category
+                  </label>
+                  <select
+                    id="workspace-draft-category"
+                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
+                    value={draftCategory()}
+                    onChange={(e) => setDraftCategory(e.currentTarget.value)}
+                  >
+                    <For each={CATEGORY_OPTIONS}>{(cat) => <option value={cat}>{cat}</option>}</For>
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    for="workspace-thinking-level"
+                    class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                  >
+                    Argon Thinking
+                  </label>
+                  <select
+                    id="workspace-thinking-level"
+                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
+                    value={thinkingLevel()}
+                    onChange={(e) => setThinkingLevel(e.currentTarget.value as ArgonThinkingLevel)}
+                  >
+                    <option value="low">Low (Fast)</option>
+                    <option value="medium">Medium (Balanced)</option>
+                    <option value="high">High (Deep)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Tags */}
+              <div>
+                <label
+                  for="workspace-draft-tags"
+                  class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                >
+                  Tags (comma-separated)
+                </label>
+                <input
+                  id="workspace-draft-tags"
+                  type="text"
+                  class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
+                  value={draftTags()}
+                  onInput={(e) => setDraftTags(e.currentTarget.value)}
+                  placeholder="gemini-4-argon, firestore, solidjs"
+                />
+              </div>
+
+              {/* Description Textarea */}
+              <div>
+                <label
+                  for="workspace-draft-description"
+                  class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                >
+                  Description
+                </label>
+                <textarea
+                  id="workspace-draft-description"
+                  rows={4}
+                  class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
+                  value={draftDescription()}
+                  onInput={(e) => setDraftDescription(e.currentTarget.value)}
+                  placeholder="Describe the feature unit, data schema, or agent objective..."
+                />
+              </div>
+
+              {/* Dry-Run Checkbox */}
+              <div class="flex items-center gap-x-2.5">
+                <input
+                  id="workspace-dry-run-checkbox"
+                  type="checkbox"
+                  class="shrink-0 border-gray-300 rounded-sm text-blue-600 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:checked:bg-blue-500 dark:checked:border-blue-500"
+                  checked={dryRunAi()}
+                  onChange={(e) => setDryRunAi(e.currentTarget.checked)}
+                />
+                <label
+                  for="workspace-dry-run-checkbox"
+                  class="text-xs text-gray-600 dark:text-neutral-400 select-none cursor-pointer"
+                >
+                  Dry-Run AI Synthesis (zero-latency deterministic fallback)
+                </label>
+              </div>
+
+              {/* Draft AI Summary & Suggested Tags Alert Box */}
+              <Show when={draftAiSummary()}>
+                <div class="rounded-xl border border-indigo-200 bg-indigo-50/70 p-3.5 dark:border-indigo-800/50 dark:bg-indigo-950/30 space-y-2">
+                  <div class="flex items-center justify-between gap-x-2">
+                    <span class="text-xs font-semibold text-indigo-800 dark:text-indigo-300">
+                      ✨ Draft AI Synthesis (Gemini 4 Argon)
+                    </span>
+                    <Show when={lastSynthMeta()}>
+                      {(meta) => (
+                        <span class="inline-flex items-center gap-x-1 py-0.5 px-2 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-800/40 dark:text-indigo-300">
+                          {meta().interactionId} &bull; {meta().durationMs}ms
+                        </span>
                       )}
                     </Show>
-
-                    <Show when={record.data?.tags && record.data.tags.length > 0}>
-                      <div class="tag-row">
-                        <For each={record.data.tags}>
-                          {(tag) => <span class="tag-chip">#{tag}</span>}
-                        </For>
-                      </div>
-                    </Show>
-
-                    <div class="card-footer-actions">
-                      <button
-                        type="button"
-                        class="btn btn-secondary"
-                        disabled={synthesizingId() === record.id}
-                        onClick={() => handleSynthesizeExisting(record)}
-                      >
-                        {synthesizingId() === record.id
-                          ? "✨ Synthesizing..."
-                          : "✨ Synthesize with Gemini 4 Argon"}
-                      </button>
-
-                      <button
-                        type="button"
-                        class="btn btn-ghost"
-                        onClick={() => handleDeleteItem(record.id)}
-                      >
-                        Delete
-                      </button>
+                  </div>
+                  <p class="text-xs leading-relaxed text-gray-700 dark:text-neutral-300">
+                    {draftAiSummary()}
+                  </p>
+                  <Show when={draftSuggestedTags().length > 0}>
+                    <div class="flex flex-wrap items-center gap-1.5 pt-1">
+                      <span class="text-[11px] font-medium text-indigo-700 dark:text-indigo-400">
+                        Suggested Tags:
+                      </span>
+                      <For each={draftSuggestedTags()}>
+                        {(tag) => (
+                          <span class="inline-flex items-center gap-x-1 py-0.5 px-2 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-800/40 dark:text-indigo-300">
+                            #{tag}
+                          </span>
+                        )}
+                      </For>
                     </div>
-                  </article>
-                )}
-              </For>
+                  </Show>
+                </div>
+              </Show>
+
+              {/* Two Preline Action Buttons */}
+              <div class="flex flex-col gap-2.5 pt-1">
+                <button
+                  type="button"
+                  class="py-2 px-3 inline-flex items-center justify-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
+                  disabled={!draftTitle().trim()}
+                  onClick={handleCreateItem}
+                >
+                  + Save to Firestore
+                </button>
+
+                <button
+                  type="button"
+                  class="py-2 px-3 inline-flex items-center justify-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-indigo-100 text-indigo-800 hover:bg-indigo-200 focus:outline-hidden dark:bg-indigo-800/30 dark:text-indigo-300 dark:hover:bg-indigo-800/50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
+                  disabled={!draftTitle().trim() || synthesizingId() === "draft"}
+                  onClick={handleSynthesizeDraft}
+                >
+                  {synthesizingId() === "draft"
+                    ? "✨ Synthesizing Draft..."
+                    : "✨ Draft AI Synthesis (Gemini 4 Argon)"}
+                </button>
+              </div>
             </div>
-          </Show>
-        </section>
+          </section>
+        </div>
+
+        {/* Right Column (lg:col-span-8): Workspace Items (/api/modules/workspace/items) */}
+        <div class="lg:col-span-8">
+          <section class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
+            <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-100">
+                  Workspace Items (/api/modules/workspace/items)
+                </h2>
+                <p class="text-xs text-gray-500 dark:text-neutral-400">
+                  Showing {filteredItems().length} of {items().length} items &bull; Click status
+                  badge to cycle state
+                </p>
+              </div>
+
+              {/* Filter Pills + Refresh Button */}
+              <div class="flex flex-wrap items-center gap-1.5">
+                <For each={["all", "todo", "in_progress", "done"] as const}>
+                  {(st) => (
+                    <button
+                      type="button"
+                      class={
+                        filterStatus() === st
+                          ? "py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50 cursor-pointer transition-colors"
+                          : "py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800 cursor-pointer transition-colors"
+                      }
+                      onClick={() => setFilterStatus(st)}
+                    >
+                      {statusLabel(st)}
+                    </button>
+                  )}
+                </For>
+
+                <button
+                  type="button"
+                  class="py-1.5 px-3 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 disabled:opacity-50 cursor-pointer transition-colors"
+                  disabled={loadingItems()}
+                  onClick={loadWorkspace}
+                >
+                  {loadingItems() ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+            </div>
+
+            <div class="p-4 md:p-5">
+              <Show
+                when={filteredItems().length > 0}
+                fallback={
+                  <div class="text-center py-10 px-4 border border-dashed border-gray-200 rounded-xl dark:border-neutral-800">
+                    <p class="text-sm font-medium text-gray-700 dark:text-neutral-300">
+                      No workspace items matching filter "{statusLabel(filterStatus())}"
+                    </p>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">
+                      Use the "Create &amp; Synthesize Item" form on the left to save a new item to
+                      Firestore.
+                    </p>
+                  </div>
+                }
+              >
+                <div class="space-y-4">
+                  <For each={filteredItems()}>
+                    {(record) => (
+                      <article class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5 space-y-3">
+                        {/* Item Top Row: Badges + Title + Status cycle button */}
+                        <div class="flex flex-wrap items-start justify-between gap-3">
+                          <div class="space-y-1">
+                            <div class="flex flex-wrap items-center gap-2">
+                              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
+                                {record.data?.category || "General"}
+                              </span>
+                              <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">
+                                #{record.id}
+                              </span>
+                              <span class="text-xs text-gray-400 dark:text-neutral-500">
+                                owner: {record.ownerUid}
+                              </span>
+                            </div>
+                            <h3 class="text-base font-semibold text-gray-800 dark:text-neutral-100">
+                              {record.data?.title}
+                            </h3>
+                          </div>
+
+                          <button
+                            type="button"
+                            class={statusBadgeClass(record.data?.status)}
+                            title="Click to cycle status (todo -> in_progress -> done)"
+                            onClick={() => handleToggleStatus(record)}
+                          >
+                            <span class={statusDotClass(record.data?.status)} />
+                            {statusLabel(record.data?.status || "todo")} ↻
+                          </button>
+                        </div>
+
+                        {/* Item Description */}
+                        <p class="text-sm text-gray-600 dark:text-neutral-300 leading-relaxed">
+                          {record.data?.description}
+                        </p>
+
+                        {/* AI Executive Summary Callout Box */}
+                        <Show when={record.data?.aiSummary}>
+                          {(summary) => (
+                            <div class="rounded-xl border border-indigo-200 bg-indigo-50/70 p-3.5 dark:border-indigo-800/50 dark:bg-indigo-950/30 space-y-1.5">
+                              <div class="flex items-center justify-between gap-x-2">
+                                <span class="text-xs font-semibold text-indigo-800 dark:text-indigo-300">
+                                  ✨ AI Executive Summary
+                                </span>
+                                <span class="text-[11px] text-indigo-600 dark:text-indigo-400">
+                                  Gemini 4 Argon
+                                </span>
+                              </div>
+                              <p class="text-xs leading-relaxed text-gray-700 dark:text-neutral-300">
+                                {summary()}
+                              </p>
+                            </div>
+                          )}
+                        </Show>
+
+                        {/* Tags & Actions Footer */}
+                        <div class="pt-2 border-t border-gray-100 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
+                          <div class="flex flex-wrap items-center gap-1.5">
+                            <Show
+                              when={record.data?.tags && record.data.tags.length > 0}
+                              fallback={
+                                <span class="text-xs text-gray-400 dark:text-neutral-500">
+                                  No tags
+                                </span>
+                              }
+                            >
+                              <For each={record.data.tags}>
+                                {(tag) => (
+                                  <span class="inline-flex items-center gap-x-1.5 py-0.5 px-2.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 dark:bg-neutral-800 dark:text-neutral-300">
+                                    #{tag}
+                                  </span>
+                                )}
+                              </For>
+                            </Show>
+                          </div>
+
+                          <div class="flex items-center gap-2">
+                            <button
+                              type="button"
+                              class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-indigo-100 text-indigo-800 hover:bg-indigo-200 dark:bg-indigo-800/30 dark:text-indigo-300 dark:hover:bg-indigo-800/50 disabled:opacity-50 cursor-pointer transition-colors"
+                              disabled={synthesizingId() === record.id}
+                              onClick={() => handleSynthesizeExisting(record)}
+                            >
+                              {synthesizingId() === record.id
+                                ? "✨ Synthesizing..."
+                                : "✨ Synthesize with Argon"}
+                            </button>
+
+                            <button
+                              type="button"
+                              class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-red-600 shadow-2xs hover:bg-red-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-red-400 dark:hover:bg-red-950/30 cursor-pointer transition-colors"
+                              onClick={() => handleDeleteItem(record.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </section>
+        </div>
       </div>
+
+      {/* 3. Bottom Collapsible/Card Section: Generic Firestore Collection Inspector */}
+      <section class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
+        <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-x-3">
+            <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-100">
+              🗄️ Generic Firestore Collection Inspector (/api/db/:collection)
+            </h2>
+            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
+              Backend: {customBackend()}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            class="py-1.5 px-3 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer transition-colors"
+            onClick={() => setInspectorOpen((prev) => !prev)}
+          >
+            {inspectorOpen() ? "Collapse Inspector" : "Expand Inspector"}
+          </button>
+        </div>
+
+        <Show when={inspectorOpen()}>
+          <div class="p-4 md:p-5 grid lg:grid-cols-12 gap-6">
+            {/* Left Inspector Controls */}
+            <div class="lg:col-span-5 space-y-4">
+              <div>
+                <label
+                  for="inspector-collection-input"
+                  class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                >
+                  Target Collection Name
+                </label>
+                <div class="flex gap-2">
+                  <input
+                    id="inspector-collection-input"
+                    type="text"
+                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
+                    value={customCollection()}
+                    onInput={(e) => setCustomCollection(e.currentTarget.value)}
+                    placeholder="ideas, users, metrics, audit_logs..."
+                  />
+                  <button
+                    type="button"
+                    class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 shrink-0 cursor-pointer transition-colors"
+                    disabled={loadingCustom()}
+                    onClick={loadCustomCollection}
+                  >
+                    {loadingCustom() ? "Loading..." : "Fetch Docs"}
+                  </button>
+                </div>
+
+                {/* Quick Collection Presets */}
+                <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span class="text-xs text-gray-500 dark:text-neutral-400">Presets:</span>
+                  <For each={QUICK_COLLECTIONS}>
+                    {(col) => (
+                      <button
+                        type="button"
+                        class={
+                          customCollection() === col
+                            ? "py-1 px-2.5 inline-flex items-center gap-x-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400 cursor-pointer transition-colors"
+                            : "py-1 px-2.5 inline-flex items-center gap-x-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-700 cursor-pointer transition-colors"
+                        }
+                        onClick={() => handleSelectQuickCollection(col)}
+                      >
+                        {col}
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  for="inspector-json-payload"
+                  class="block text-sm font-medium mb-1.5 text-gray-800 dark:text-neutral-200"
+                >
+                  Raw JSON Document Payload
+                </label>
+                <textarea
+                  id="inspector-json-payload"
+                  rows={5}
+                  class="py-2 px-3 block w-full font-mono border border-gray-200 rounded-lg text-xs focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
+                  value={customJsonInput()}
+                  onInput={(e) => setCustomJsonInput(e.currentTarget.value)}
+                />
+              </div>
+
+              <button
+                type="button"
+                class="w-full py-2 px-3 inline-flex items-center justify-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
+                onClick={handleCreateCustomDoc}
+              >
+                + Insert JSON Document into /api/db/{customCollection().trim() || "collection"}
+              </button>
+            </div>
+
+            {/* Right Inspector Documents Table / Card View */}
+            <div class="lg:col-span-7 space-y-3">
+              <div class="flex items-center justify-between">
+                <h3 class="text-sm font-semibold text-gray-800 dark:text-neutral-200">
+                  Documents in{" "}
+                  <code class="px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-neutral-800 text-xs font-mono">
+                    /api/db/{customCollection().trim() || "ideas"}
+                  </code>{" "}
+                  ({customDocs().length})
+                </h3>
+              </div>
+
+              <Show
+                when={customDocs().length > 0}
+                fallback={
+                  <div class="text-center py-8 px-4 border border-dashed border-gray-200 rounded-xl dark:border-neutral-800">
+                    <p class="text-xs text-gray-500 dark:text-neutral-400">
+                      No documents found in collection{" "}
+                      <strong class="font-semibold text-gray-700 dark:text-neutral-300">
+                        {customCollection()}
+                      </strong>
+                      . Insert a JSON document on the left to inspect it.
+                    </p>
+                  </div>
+                }
+              >
+                <div class="grid sm:grid-cols-2 gap-3">
+                  <For each={customDocs()}>
+                    {(doc) => (
+                      <div class="flex flex-col bg-gray-50/70 border border-gray-200 rounded-xl p-3.5 dark:bg-neutral-950/60 dark:border-neutral-800 space-y-2">
+                        <div class="flex items-center justify-between gap-2">
+                          <span class="inline-flex items-center gap-x-1 py-0.5 px-2 rounded-full text-xs font-mono font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400 truncate">
+                            {doc.collection}/{doc.id}
+                          </span>
+                          <button
+                            type="button"
+                            class="py-1 px-2 inline-flex items-center text-xs font-medium rounded-lg border border-gray-200 bg-white text-red-600 hover:bg-red-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-red-400 dark:hover:bg-red-950/30 cursor-pointer transition-colors"
+                            onClick={() => handleDeleteCustomDoc(doc.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                        <div class="text-[11px] text-gray-500 dark:text-neutral-400">
+                          Owner UID: <span class="font-mono">{doc.ownerUid}</span>
+                        </div>
+                        <pre class="p-2.5 rounded-lg bg-white border border-gray-200 dark:bg-neutral-900 dark:border-neutral-800 text-xs font-mono text-gray-800 dark:text-neutral-200 overflow-x-auto">
+                          {JSON.stringify(doc.data, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </div>
+        </Show>
+      </section>
     </div>
   );
 }
