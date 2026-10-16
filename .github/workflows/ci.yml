@@ -1,0 +1,65 @@
+name: CI (Bun + Biome + TS + Go Gin)
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ts-biome-web:
+    name: Bun + Biome + TypeScript + SolidJS Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run Biome lint & format check
+        run: bun run check
+
+      - name: Run TypeScript typecheck across workspaces
+        run: bun run typecheck
+
+      - name: Build SolidJS production bundle (@deepmind/web)
+        run: bun --filter @deepmind/web build
+
+  go-gin-api:
+    name: Go 1.27 Gin Vet + Race Test + Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go 1.27
+        uses: actions/setup-go@v5
+        with:
+          go-version: "^1.27.0"
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run Go unit tests with race detector
+        run: go test -v -race ./...
+
+      - name: Compile Go Gin server binary
+        run: go build -v -ldflags="-s -w" -o ./bin/server ./cmd/server

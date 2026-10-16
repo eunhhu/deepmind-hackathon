@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Go binaries & test artifacts
+apps/api/server
+apps/api/bin/
+*.exe
+*.test
+*.out
+coverage.txt
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp

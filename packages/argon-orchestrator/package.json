@@ -1,0 +1,16 @@
+{
+  "name": "@deepmind/argon-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@deepmind/shared": "workspace:*",
+    "@google/genai": "^2.29.1"
+  }
+}

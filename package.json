@@ -1,0 +1,20 @@
+{
+  "name": "deepmind-argon-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "bun --filter @deepmind/web dev",
+    "dev:api": "cd apps/api && go run ./cmd/server",
+    "check": "bunx @biomejs/biome check .",
+    "format": "bunx @biomejs/biome format --write .",
+    "typecheck": "bun --filter '*' typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}
