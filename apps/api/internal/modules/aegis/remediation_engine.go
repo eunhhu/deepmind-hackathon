@@ -222,6 +222,9 @@ func BuildUnifiedGitPatch(project *AegisProject) string {
 	sb.WriteString("---\n")
 	sb.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", filePath, filePath))
 	sb.WriteString("index 84a910c..e9f412b 100644\n")
+	if !strings.Contains(pr.CodeDiff.UnifiedDiff, "--- a/") {
+		sb.WriteString(fmt.Sprintf("--- a/%s\n+++ b/%s\n", filePath, filePath))
+	}
 	sb.WriteString(pr.CodeDiff.UnifiedDiff)
 	if !strings.HasSuffix(pr.CodeDiff.UnifiedDiff, "\n") {
 		sb.WriteString("\n")

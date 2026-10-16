@@ -24,3 +24,7 @@ coverage.txt
 .idea/
 .vscode/
 *.swp
+
+# Playwright artifacts
+test-results/
+playwright-report/
