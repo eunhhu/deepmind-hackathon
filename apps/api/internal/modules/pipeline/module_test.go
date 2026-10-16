@@ -55,8 +55,8 @@ func TestRouteEndpoint(t *testing.T) {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
 
-	if decision.Tier != "sandbox" {
-		t.Errorf("expected tier 'sandbox', got %q", decision.Tier)
+	if decision.Tier != "autonomous-sandbox" {
+		t.Errorf("expected tier 'autonomous-sandbox', got %q", decision.Tier)
 	}
 	if decision.Model != "gemini-4-argon" {
 		t.Errorf("expected model 'gemini-4-argon', got %q", decision.Model)
@@ -74,9 +74,9 @@ func TestPolishEndpointDryRun(t *testing.T) {
 
 	payload := VerifyCritiquePolishRequest{
 		ArtifactTitle: "SwarmDispatcherCard.tsx",
-		ArtifactType:  "component",
+		ArtifactType:  "ui-preline",
 		DraftContent:  "<button onClick={run}>Launch Swarm</button>",
-		Requirements:  []string{"Add explicit type=\"button\"", "Use Preline semantic tokens"},
+		Requirements:  "Add explicit type=\"button\" and Preline semantic tokens",
 		SharedContext: "SolidJS + Preline UI dashboard",
 		DryRun:        true,
 	}
@@ -107,10 +107,10 @@ func TestPolishEndpointDryRun(t *testing.T) {
 		t.Errorf("expected parallelDraftsCount 2, got %d", resp.ParallelDraftsCount)
 	}
 	if resp.FinalScore <= resp.InitialScore {
-		t.Errorf("expected finalScore (%d) > initialScore (%d)", resp.FinalScore, resp.InitialScore)
+		t.Errorf("expected finalScore (%f) > initialScore (%f)", resp.FinalScore, resp.InitialScore)
 	}
-	if len(resp.CritiqueItems) == 0 {
-		t.Errorf("expected non-empty critiqueItems")
+	if len(resp.CritiqueItems) == 0 || resp.CritiqueItems[0].Score <= 0 {
+		t.Errorf("expected non-empty critiqueItems with positive score")
 	}
 	if resp.PolishedOutput == "" {
 		t.Errorf("expected non-empty polishedOutput")
