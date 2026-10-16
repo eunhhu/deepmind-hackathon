@@ -14,7 +14,7 @@
     "test": "bun --filter '*' test",
     "test:api": "cd apps/api && go test -v -race ./...",
     "test:all": "bun --filter '*' test && cd apps/api && go test -race ./...",
-    "test:e2e": "playwright test"
+    "test:e2e": "bunx playwright test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",

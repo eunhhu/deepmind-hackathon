@@ -1,178 +1,137 @@
-import type { FeatureModuleMeta } from "@deepmind/shared";
-import { createSignal, For, onMount, Show } from "solid-js";
+import { type Component, createSignal, For, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
-import { fetchBackendModules } from "./core/api/client";
-import { AuthBar } from "./core/auth/AuthBar";
-import { FRONTEND_MODULES, getFrontendModule } from "./modules/registry";
+import { AuthBar, aegisViewMode } from "./core/auth/AuthBar";
+import { AegisModule } from "./modules/aegis/AegisModule";
+import { FRONTEND_MODULES } from "./modules/registry";
 
-export function App() {
-  const [activeModuleId, setActiveModuleId] = createSignal<string>(
-    FRONTEND_MODULES[0]?.id ?? "aegis",
-  );
-  const [backendModules, setBackendModules] = createSignal<FeatureModuleMeta[]>([]);
-  const [showArchGuide, setShowArchGuide] = createSignal<boolean>(false);
+type OpsTabId = "aegis-verification" | "workspace" | "pipeline";
 
-  onMount(async () => {
-    try {
-      const discovered = await fetchBackendModules();
-      setBackendModules(discovered);
-    } catch {
-      // Backend may not be running in isolated frontend dev mode
-    }
-  });
+const OPS_TABS: ReadonlyArray<{
+  id: OpsTabId;
+  label: string;
+  testId: string;
+}> = [
+  {
+    id: "aegis-verification",
+    label: "Verification Matrix & Swarm Loop",
+    testId: "ops-tab-aegis-verification",
+  },
+  {
+    id: "workspace",
+    label: "Parallel Workspace",
+    testId: "ops-tab-workspace",
+  },
+  {
+    id: "pipeline",
+    label: "Effort Router & Critic Polisher",
+    testId: "ops-tab-pipeline",
+  },
+];
 
-  const activeModule = () => getFrontendModule(activeModuleId()) ?? FRONTEND_MODULES[0];
+export const App: Component = () => {
+  const [activeOpsTab, setActiveOpsTab] = createSignal<OpsTabId>("aegis-verification");
+
+  const workspaceModules = () => FRONTEND_MODULES.filter((mod) => mod.id === "workspace");
+  const pipelineModules = () => FRONTEND_MODULES.filter((mod) => mod.id === "swarm");
 
   return (
-    <div class="min-h-screen bg-gray-50 dark:bg-neutral-950 text-gray-800 dark:text-neutral-200">
+    <div class="min-h-screen bg-[#F8F9FA] dark:bg-[#111214] text-[#111827] dark:text-[#F3F4F6] flex flex-col">
+      <a
+        href="#main-content"
+        class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-4 focus:py-2 focus:rounded-[12px] focus:bg-[#4F46E5] focus:text-white focus:text-[14px] focus:font-semibold"
+      >
+        Skip to main content
+      </a>
+
       <AuthBar />
 
-      <div class="max-w-[85rem] w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Top Hero Card */}
-        <section class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
-          <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
-            <div class="space-y-1">
-              <div class="flex flex-wrap items-center gap-2.5">
-                <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-semibold bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400">
-                  AEGIS-4
-                </span>
-                <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                  gemini-4-argon + antigravity-preview-09-2026
-                </span>
-                <h1 class="text-lg sm:text-xl font-bold text-gray-900 dark:text-white tracking-tight">
-                  Autonomous Exploit Verification, Binary Hot-Patch &amp; Route-Shield Platform
-                </h1>
-              </div>
-              <p class="text-xs sm:text-sm text-gray-600 dark:text-neutral-400">
-                Zero-False-Positive Sandbox PoC (RED &rarr; GREEN) &bull; DNS TXT Ownership Gate
-                &bull; GitHub Security PR &bull; ELF64 Binary Hot-Patch &bull; Live Edge Route
-                Shield
-              </p>
-            </div>
-
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
-                <span>Modules:</span>
-                <strong class="font-semibold">
-                  {backendModules().length || FRONTEND_MODULES.length}
-                </strong>
-              </span>
-              <button
-                type="button"
-                class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer transition-colors"
-                onClick={() => setShowArchGuide((prev) => !prev)}
-              >
-                {showArchGuide() ? "Hide Architecture" : "Platform Architecture"}
-              </button>
-            </div>
-          </div>
-
-          {/* Preline 3-Column Architecture Callout Grid */}
-          <Show when={showArchGuide()}>
-            <div class="p-4 md:p-5 bg-gray-50/50 dark:bg-neutral-900/50 rounded-b-xl">
-              <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 space-y-2">
-                  <div class="flex items-center justify-between gap-x-2">
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                      1. 3-Mode Intake &amp; DNS Gate
-                    </span>
-                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">FR-1</span>
+      <main id="main-content" class="flex-1">
+        <Show
+          when={aegisViewMode() === "product"}
+          fallback={
+            <div
+              data-testid="aegis-ops-console-view"
+              class="max-w-[1440px] mx-auto p-6 lg:p-12 space-y-6"
+            >
+              <div class="bg-white dark:bg-[#17181C] border border-[#EAECF0] dark:border-[#252830] rounded-[16px] p-6 shadow-2xs flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                <div class="space-y-1">
+                  <div class="inline-flex items-center gap-2 text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4F46E5] dark:text-[#818CF8]">
+                    <span>Internal Operator Diagnostics</span>
                   </div>
-                  <code class="text-xs font-mono text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded-md block truncate">
-                    github &bull; url-dns (_aegis-verify TXT) &bull; binary
-                  </code>
-                  <p class="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
-                    Auto-classifies GitHub CD workflows, enforces Google DoH DNS TXT domain
-                    ownership before scanning, and parses ELF64/PE32+/Mach-O headers.
+                  <h1 class="text-[22px] leading-[30px] font-bold tracking-[-0.02em] text-[#111827] dark:text-[#F3F4F6]">
+                    Gemini 4 Argon Swarm &amp; Infrastructure Console
+                  </h1>
+                  <p class="text-[14px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF]">
+                    Inspect formal verification matrices, parallel sandbox workspaces, and effort
+                    routing telemetry.
                   </p>
                 </div>
 
-                <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 space-y-2">
-                  <div class="flex items-center justify-between gap-x-2">
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
-                      2. Red-to-Green Sandbox Loop
-                    </span>
-                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">FR-2</span>
-                  </div>
-                  <code class="text-xs font-mono text-teal-700 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-1 rounded-md block truncate">
-                    Recon -&gt; PoC (RED) -&gt; Patch -&gt; Re-Verify (GREEN)
-                  </code>
-                  <p class="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
-                    Zero false positives: every finding is proved with a live sandbox PoC before
-                    remediation and re-tested post-patch until blocked.
-                  </p>
-                </div>
-
-                <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 space-y-2 sm:col-span-2 lg:col-span-1">
-                  <div class="flex items-center justify-between gap-x-2">
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-                      3. Tri-Mode Self-Healing
-                    </span>
-                    <span class="text-xs font-mono text-gray-400 dark:text-neutral-500">FR-3</span>
-                  </div>
-                  <code class="text-xs font-mono text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-1 rounded-md block truncate">
-                    git-pr &bull; binary-patch &bull; route-shield
-                  </code>
-                  <p class="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
-                    Generates source code GitHub PR diffs, instruction-level binary hot-patches with
-                    1-click ELF download, and live Edge Route Shields.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </Show>
-        </section>
-
-        {/* Preline Segmented Nav Tabs */}
-        <nav
-          class="flex flex-wrap gap-2 bg-gray-100 p-1.5 rounded-xl dark:bg-neutral-900 border border-gray-200 dark:border-neutral-800"
-          aria-label="Feature Modules"
-        >
-          <For each={FRONTEND_MODULES}>
-            {(mod) => {
-              const isActive = () => activeModuleId() === mod.id;
-              return (
-                <button
-                  type="button"
-                  class={
-                    isActive()
-                      ? "flex-1 min-w-[220px] text-left p-3 rounded-lg bg-white text-gray-900 shadow-2xs border border-gray-200/80 dark:bg-neutral-800 dark:text-white dark:border-neutral-700 cursor-pointer transition-all"
-                      : "flex-1 min-w-[220px] text-left p-3 rounded-lg bg-transparent text-gray-600 hover:bg-white/60 hover:text-gray-900 dark:text-neutral-400 dark:hover:bg-neutral-800/50 dark:hover:text-neutral-200 cursor-pointer transition-all"
-                  }
-                  onClick={() => setActiveModuleId(mod.id)}
+                <div
+                  role="tablist"
+                  aria-label="Ops console sections"
+                  class="flex flex-wrap items-center gap-2"
                 >
-                  <div class="flex items-center justify-between gap-x-2 mb-1">
-                    <span class="text-sm font-semibold tracking-tight">{mod.title}</span>
-                    <span
-                      class={
-                        isActive()
-                          ? "inline-flex items-center gap-x-1.5 py-0.5 px-2 rounded-full text-[11px] font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400"
-                          : "inline-flex items-center gap-x-1.5 py-0.5 px-2 rounded-full text-[11px] font-medium bg-gray-200/80 text-gray-700 dark:bg-neutral-800 dark:text-neutral-400"
-                      }
-                    >
-                      {mod.badge}
-                    </span>
-                  </div>
-                  <p class="text-xs text-gray-500 dark:text-neutral-400 line-clamp-1">
-                    {mod.subtitle}
-                  </p>
-                  <div class="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-gray-400 dark:text-neutral-500">
-                    <span>API: {mod.apiPrefix}</span>
-                    <Show when={mod.collections.length > 0}>
-                      <span>&bull; DB: {mod.collections.join(", ")}</span>
-                    </Show>
-                  </div>
-                </button>
-              );
-            }}
-          </For>
-        </nav>
+                  <For each={OPS_TABS}>
+                    {(tab) => {
+                      const isSelected = () => activeOpsTab() === tab.id;
+                      return (
+                        <button
+                          type="button"
+                          role="tab"
+                          data-testid={tab.testId}
+                          aria-selected={isSelected()}
+                          onClick={() => setActiveOpsTab(tab.id)}
+                          class={`h-10 rounded-full px-4 inline-flex items-center gap-2 text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                            isSelected()
+                              ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-[#17181C] dark:text-[#818CF8] dark:border-[#818CF8]"
+                              : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C] dark:hover:bg-[#212329]"
+                          }`}
+                        >
+                          <span>{tab.label}</span>
+                        </button>
+                      );
+                    }}
+                  </For>
+                </div>
+              </div>
 
-        {/* Active Module Viewport */}
-        <main>
-          <Show when={activeModule()}>{(mod) => <Dynamic component={mod().Component} />}</Show>
-        </main>
-      </div>
+              <Show when={activeOpsTab() === "aegis-verification"}>
+                <AegisModule viewMode="ops" />
+              </Show>
+
+              <Show when={activeOpsTab() === "workspace"}>
+                <div class="space-y-6">
+                  <For each={workspaceModules()}>
+                    {(mod) => <Dynamic component={mod.Component} />}
+                  </For>
+                </div>
+              </Show>
+
+              <Show when={activeOpsTab() === "pipeline"}>
+                <div class="space-y-6">
+                  <For each={pipelineModules()}>
+                    {(mod) => <Dynamic component={mod.Component} />}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          }
+        >
+          <div data-testid="aegis-product-view">
+            <AegisModule viewMode="product" />
+          </div>
+        </Show>
+      </main>
+
+      <footer class="border-t border-[#EAECF0] dark:border-[#252830] bg-white dark:bg-[#17181C] py-4 px-6">
+        <div class="max-w-[1600px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-[13px] leading-[20px] text-[#6B7280] dark:text-[#6E7686]">
+          <span>AEGIS-4 Automated Vulnerability Remediation &amp; Verification Platform</span>
+          <span>Deterministic Patch Validation &amp; Runtime Shielding</span>
+        </div>
+      </footer>
     </div>
   );
-}
+};
+
+export default App;

@@ -1,1512 +1,657 @@
 import type {
-  AegisBinaryAnalysis,
-  AegisGitPrReport,
+  AegisCreatePrResponse,
   AegisProject,
-  AegisRemediationMode,
-  AegisRouteShieldRule,
   AegisShieldTestAttackResponse,
+  AegisTimelineStep,
 } from "@deepmind/shared";
 import { createEffect, createSignal, For, Show } from "solid-js";
-
-type ShieldSnippetKey = keyof AegisRouteShieldRule["snippets"];
-
-interface PolishCritiqueItem {
-  dimension: string;
-  beforeNote: string;
-  afterNote: string;
-  scoreLabel: string;
-}
-
-interface PolishAuditResult {
-  initialScore: number;
-  finalScore: number;
-  summary: string;
-  items: PolishCritiqueItem[];
-}
-
-interface PrSyncState {
-  prNumber: number;
-  branchName: string;
-  prUrl: string;
-  cliCommand: string;
-  status: string;
-  syncedAt: string;
-}
-
-interface ProxyGatewayTestResult {
-  httpStatus: number;
-  verdict: "BLOCKED_GREEN" | "EXPLOITED_RED";
-  latencyMs: number;
-  responseBody: string;
-  curlCommand: string;
-}
-
-const SHIELD_SNIPPET_OPTIONS: Array<{
-  key: ShieldSnippetKey;
-  label: string;
-  language: string;
-}> = [
-  { key: "cloudRunGin", label: "Cloud Run Go Gin", language: "go" },
-  { key: "cloudArmor", label: "Google Cloud Armor", language: "hcl" },
-  { key: "cloudflareWorker", label: "Cloudflare Worker", language: "typescript" },
-  { key: "nginx", label: "NGINX", language: "nginx" },
-  { key: "envoy", label: "Envoy", language: "yaml" },
-];
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
+import {
+  createAegisGitHubPr,
+  getAegisBinaryDownloadUrl,
+  getAegisPatchDownloadUrl,
+} from "../../core/api/client";
+import {
+  PrelineAlert,
+  PrelineBadge,
+  PrelineButton,
+  PrelineCard,
+  PrelineInput,
+} from "../../core/ui/preline";
 
 export function AegisPatchInsightPanel(props: {
   project: AegisProject;
+  liveSteps: AegisTimelineStep[];
+  expanded: boolean;
+  onExpand: () => void;
+  attackPayload: string;
+  setAttackPayload: (val: string) => void;
+  attackResult: AegisShieldTestAttackResponse | null;
   onToggleShield: (enabled: boolean) => Promise<void>;
-  onTestAttack: (payload: string) => Promise<AegisShieldTestAttackResponse | null>;
-  onRunScan: (mode?: AegisRemediationMode) => Promise<void>;
-  busy: boolean;
+  onTestAttack: () => Promise<void>;
+  onProjectUpdate: (project: AegisProject) => void;
 }) {
-  const [localProject, setLocalProject] = createSignal<AegisProject>(props.project);
-  const [activeTab, setActiveTab] = createSignal<AegisRemediationMode>(
-    props.project.remediationMode,
-  );
-  const [attackPayload, setAttackPayload] = createSignal<string>(
-    props.project.routeShield?.sampleAttackPayload ?? "",
-  );
-  const [attackResult, setAttackResult] = createSignal<AegisShieldTestAttackResponse | null>(null);
-  const [selectedSnippetKey, setSelectedSnippetKey] = createSignal<ShieldSnippetKey>("cloudRunGin");
+  const defaultTab = () => {
+    const mode = props.project.remediationMode;
+    if (mode === "binary-patch") return "binary" as const;
+    if (mode === "route-shield") return "shield" as const;
+    return "git" as const;
+  };
 
-  // Tab 1 interactive states (GitHub PR sync, patch download, Verify-Critique-Polish audit)
-  const [prBusy, setPrBusy] = createSignal(false);
-  const [prSyncState, setPrSyncState] = createSignal<PrSyncState | null>(null);
-  const [patchDownloading, setPatchDownloading] = createSignal(false);
-  const [polishBusy, setPolishBusy] = createSignal(false);
-  const [polishAudit, setPolishAudit] = createSignal<PolishAuditResult | null>(null);
-  const [copiedTextKey, setCopiedTextKey] = createSignal<string | null>(null);
-
-  // Tab 2 interactive states (Binary download & custom binary upload)
-  const [binaryBusy, setBinaryBusy] = createSignal(false);
-  const [binaryUploadNotice, setBinaryUploadNotice] = createSignal<string | null>(null);
-  let binaryFileInputRef: HTMLInputElement | undefined;
-
-  // Tab 3 interactive states (Live WAF Regex & Rate-Limit Rule Editor + Reverse-Proxy test)
-  const [editProtectedPath, setEditProtectedPath] = createSignal<string>(
-    props.project.routeShield?.protectedPath ?? "/api/v1/webhooks/preview",
+  const [activeTab, setActiveTab] = createSignal<"git" | "binary" | "shield" | "verification">(
+    defaultTab(),
   );
-  const [editBlockPatternRegex, setEditBlockPatternRegex] = createSignal<string>(
-    props.project.routeShield?.blockPatternRegex ?? "",
-  );
-  const [editRateLimitRps, setEditRateLimitRps] = createSignal<number>(
-    props.project.routeShield?.rateLimitRps ?? 25,
-  );
-  const [ruleSaveBusy, setRuleSaveBusy] = createSignal(false);
-  const [ruleSaveStatus, setRuleSaveStatus] = createSignal<string | null>(null);
-  const [proxyBusy, setProxyBusy] = createSignal(false);
-  const [proxyResult, setProxyResult] = createSignal<ProxyGatewayTestResult | null>(null);
+  const [diffViewMode, setDiffViewMode] = createSignal<"split" | "unified">("split");
+  const [creatingPr, setCreatingPr] = createSignal(false);
+  const [prResult, setPrResult] = createSignal<AegisCreatePrResponse | null>(null);
+  const [activeSnippet, setActiveSnippet] = createSignal<
+    "cloudRunGin" | "cloudArmor" | "cloudflareWorker" | "nginx" | "envoy"
+  >("cloudRunGin");
 
+  let lastProjectId = "";
   createEffect(() => {
-    const incoming = props.project;
-    setLocalProject(incoming);
-    setActiveTab(incoming.remediationMode);
-    if (incoming.routeShield) {
-      setAttackPayload(incoming.routeShield.sampleAttackPayload);
-      setEditProtectedPath(incoming.routeShield.protectedPath);
-      setEditBlockPatternRegex(incoming.routeShield.blockPatternRegex);
-      setEditRateLimitRps(incoming.routeShield.rateLimitRps);
+    const id = props.project.id;
+    const mode = props.project.remediationMode;
+    if (id !== lastProjectId) {
+      lastProjectId = id;
+      setPrResult(null);
+      setDiffViewMode("split");
+      if (mode === "binary-patch") setActiveTab("binary");
+      else if (mode === "route-shield") setActiveTab("shield");
+      else setActiveTab("git");
     }
-    setAttackResult(null);
-    setProxyResult(null);
-    setRuleSaveStatus(null);
   });
 
-  const copyToClipboard = async (key: string, value: string) => {
+  function selectTab(tab: "git" | "binary" | "shield" | "verification") {
+    setActiveTab(tab);
+    props.onExpand();
+  }
+
+  async function handleCreatePr() {
+    setCreatingPr(true);
     try {
-      await navigator.clipboard.writeText(value);
-      setCopiedTextKey(key);
-      setTimeout(() => {
-        if (copiedTextKey() === key) {
-          setCopiedTextKey(null);
-        }
-      }, 2000);
-    } catch {
-      // Clipboard fallback ignored in headless context
-    }
-  };
-
-  // Tab 1 Handler: Open / Sync GitHub PR
-  const handleCreateOrSyncPr = async () => {
-    const proj = localProject();
-    setPrBusy(true);
-    try {
-      const response = await fetch(`/api/modules/aegis/projects/${proj.id}/create-pr`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: proj.id }),
-      });
-      const raw = (await response.json()) as Record<string, unknown>;
-      if (raw.project && typeof raw.project === "object") {
-        setLocalProject(raw.project as AegisProject);
-      } else if (raw.gitPrReport && typeof raw.gitPrReport === "object") {
-        setLocalProject({
-          ...proj,
-          gitPrReport: raw.gitPrReport as AegisGitPrReport,
-        });
-      }
-
-      const report = (raw.project && typeof raw.project === "object"
-        ? (raw.project as AegisProject).gitPrReport
-        : (raw.gitPrReport as AegisGitPrReport | undefined)) ??
-        localProject().gitPrReport ?? {
-          branchName: `aegis/fix-${proj.id}`,
-          prNumber: 412,
-          prUrl: "https://github.com/eunhhu/deepmind-hackathon/pull/412",
-          status: "open",
-        };
-
-      const cliCommand =
-        typeof raw.ghCliCommand === "string"
-          ? raw.ghCliCommand
-          : typeof raw.cliCommand === "string"
-            ? raw.cliCommand
-            : `gh pr create --base main --head ${report.branchName} --title "fix(security): autonomous AEGIS-4 patch for ${proj.name}" --body-file .aegis/pr-${report.prNumber}.md`;
-
-      setPrSyncState({
-        prNumber: typeof raw.prNumber === "number" ? raw.prNumber : report.prNumber,
-        branchName: typeof raw.branchName === "string" ? raw.branchName : report.branchName,
-        prUrl: typeof raw.prUrl === "string" ? raw.prUrl : report.prUrl,
-        cliCommand,
-        status: typeof raw.status === "string" ? raw.status : "OPEN / SYNCED",
-        syncedAt: new Date().toLocaleTimeString(),
-      });
-    } catch {
-      const fallbackReport = localProject().gitPrReport;
-      if (fallbackReport) {
-        setPrSyncState({
-          prNumber: fallbackReport.prNumber,
-          branchName: fallbackReport.branchName,
-          prUrl: fallbackReport.prUrl,
-          cliCommand: `gh pr create --base main --head ${fallbackReport.branchName} --title "fix(security): autonomous AEGIS-4 patch for ${proj.name}" --body-file .aegis/pr-${fallbackReport.prNumber}.md`,
-          status: "OPEN / SYNCED",
-          syncedAt: new Date().toLocaleTimeString(),
-        });
-      }
+      const res = await createAegisGitHubPr(props.project.id);
+      props.onProjectUpdate(res.project);
+      setPrResult(res);
     } finally {
-      setPrBusy(false);
+      setCreatingPr(false);
     }
-  };
+  }
 
-  // Tab 1 Handler: Download unified .patch file (git apply)
-  const handleDownloadPatchFile = async () => {
-    const proj = localProject();
-    setPatchDownloading(true);
-    try {
-      const response = await fetch(`/api/modules/aegis/projects/${proj.id}/patch-download`);
-      let patchContent = "";
-      if (response.ok) {
-        const contentType = response.headers.get("content-type") ?? "";
-        if (contentType.includes("application/json")) {
-          const data = (await response.json()) as Record<string, unknown>;
-          patchContent =
-            typeof data.patch === "string"
-              ? data.patch
-              : typeof data.unifiedDiff === "string"
-                ? data.unifiedDiff
-                : (proj.gitPrReport?.codeDiff.unifiedDiff ?? "");
-        } else {
-          patchContent = await response.text();
-        }
-      } else {
-        patchContent = proj.gitPrReport?.codeDiff.unifiedDiff ?? "";
-      }
-
-      const blob = new Blob([patchContent], { type: "text/x-diff;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `aegis-fix-${proj.id}.patch`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    } catch {
-      const fallbackDiff = proj.gitPrReport?.codeDiff.unifiedDiff ?? "";
-      const blob = new Blob([fallbackDiff], { type: "text/x-diff;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `aegis-fix-${proj.id}.patch`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    } finally {
-      setPatchDownloading(false);
-    }
-  };
-
-  // Tab 1 Handler: Verify-Critique-Polish Audit
-  const handleRunPolishAudit = async () => {
-    const proj = localProject();
-    setPolishBusy(true);
-    try {
-      const response = await fetch(`/api/modules/aegis/projects/${proj.id}/polish`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: proj.id }),
-      });
-      const raw = (await response.json()) as Record<string, unknown>;
-      if (raw.project && typeof raw.project === "object") {
-        setLocalProject(raw.project as AegisProject);
-      }
-
-      const auditObj =
-        raw.audit && typeof raw.audit === "object"
-          ? (raw.audit as Record<string, unknown>)
-          : raw.polish && typeof raw.polish === "object"
-            ? (raw.polish as Record<string, unknown>)
-            : raw;
-
-      const initialScore = typeof auditObj.initialScore === "number" ? auditObj.initialScore : 8.4;
-      const finalScore = typeof auditObj.finalScore === "number" ? auditObj.finalScore : 9.9;
-      const summary =
-        typeof auditObj.summary === "string"
-          ? auditObj.summary
-          : "3-point autonomous security patch rubric verified AST sink elimination, strict boundary canonicalization, and zero regression overhead.";
-
-      const rawItems = Array.isArray(auditObj.critiqueItems)
-        ? auditObj.critiqueItems
-        : Array.isArray(auditObj.items)
-          ? auditObj.items
-          : Array.isArray(auditObj.rubric)
-            ? auditObj.rubric
-            : [];
-
-      const parsedItems: PolishCritiqueItem[] =
-        rawItems.length > 0
-          ? rawItems.map((entry, idx) => {
-              if (typeof entry === "string") {
-                return {
-                  dimension: `Rubric Gate #${idx + 1}`,
-                  beforeNote: "Initial draft patch verified for functional exploit mitigation",
-                  afterNote: entry,
-                  scoreLabel: "10/10",
-                };
-              }
-              const item = entry as Record<string, unknown>;
-              return {
-                dimension:
-                  typeof item.dimension === "string"
-                    ? item.dimension
-                    : typeof item.title === "string"
-                      ? item.title
-                      : typeof item.criterion === "string"
-                        ? item.criterion
-                        : `Rubric Gate #${idx + 1}`,
-                beforeNote:
-                  typeof item.before === "string"
-                    ? item.before
-                    : typeof item.critique === "string"
-                      ? item.critique
-                      : "Initial synthesis left secondary edge-case coercion path unguarded.",
-                afterNote:
-                  typeof item.after === "string"
-                    ? item.after
-                    : typeof item.polish === "string"
-                      ? item.polish
-                      : typeof item.improvement === "string"
-                        ? item.improvement
-                        : "Polished AST patch enforces strict allowlist & constant-time bounds check.",
-                scoreLabel:
-                  typeof item.score === "string"
-                    ? item.score
-                    : typeof item.score === "number"
-                      ? `${item.score}/10`
-                      : "9.9/10",
-              };
-            })
-          : [
-              {
-                dimension: "1. Complete Exploit Sink Elimination",
-                beforeNote: "Initial patch guarded primary sink but allowed raw error reflection.",
-                afterNote:
-                  "Polished patch strips tainted input prior to AST sink and enforces typed errors.",
-                scoreLabel: "10.0/10",
-              },
-              {
-                dimension: "2. Edge-Case & Bypass Resistance",
-                beforeNote: "Unicode normalization & URL double-encoding edge cases unverified.",
-                afterNote:
-                  "Added canonical decoding + strict allowlist validation before execution.",
-                scoreLabel: "9.9/10",
-              },
-              {
-                dimension: "3. Zero-Regression Production Safety",
-                beforeNote: "Missing explicit timeout / resource ceiling on fallback branch.",
-                afterNote:
-                  "Enforced deterministic bounds check with zero heap allocation overhead.",
-                scoreLabel: "9.8/10",
-              },
-            ];
-
-      setPolishAudit({
-        initialScore,
-        finalScore,
-        summary,
-        items: parsedItems,
-      });
-    } catch {
-      setPolishAudit({
-        initialScore: 8.4,
-        finalScore: 9.9,
-        summary:
-          "3-point Verify-Critique-Polish security rubric completed with AST sink isolation and zero regression.",
-        items: [
-          {
-            dimension: "1. Complete Exploit Sink Elimination",
-            beforeNote: "Initial patch guarded primary sink but allowed raw error reflection.",
-            afterNote:
-              "Polished patch strips tainted input prior to AST sink and enforces typed errors.",
-            scoreLabel: "10.0/10",
-          },
-          {
-            dimension: "2. Edge-Case & Bypass Resistance",
-            beforeNote: "Unicode normalization & URL double-encoding edge cases unverified.",
-            afterNote: "Added canonical decoding + strict allowlist validation before execution.",
-            scoreLabel: "9.9/10",
-          },
-          {
-            dimension: "3. Zero-Regression Production Safety",
-            beforeNote: "Missing explicit timeout / resource ceiling on fallback branch.",
-            afterNote: "Enforced deterministic bounds check with zero heap allocation overhead.",
-            scoreLabel: "9.8/10",
-          },
-        ],
-      });
-    } finally {
-      setPolishBusy(false);
-    }
-  };
-
-  // Tab 2 Handler: Download Patched Binary (-aegis-patched)
-  const handleDownloadPatchedBinary = async () => {
-    const proj = localProject();
-    const binary = proj.binaryAnalysis;
-    if (!binary) return;
-    setBinaryBusy(true);
-    try {
-      const endpoint =
-        binary.downloadUrl || `/api/modules/aegis/projects/${proj.id}/binary-download`;
-      const response = await fetch(endpoint);
-      const blob = response.ok
-        ? await response.blob()
-        : new Blob([`ELF64-AEGIS-PATCHED:${binary.sha256After}`], {
-            type: "application/octet-stream",
-          });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `patched-${binary.fileName}-aegis-patched`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    } catch {
-      const blob = new Blob([`ELF64-AEGIS-PATCHED:${binary.sha256After}`], {
-        type: "application/octet-stream",
-      });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `patched-${binary.fileName}-aegis-patched`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    } finally {
-      setBinaryBusy(false);
-    }
-  };
-
-  // Tab 2 Handler: Upload Custom Binary (ELF64 / PE32+ / Mach-O)
-  const handleCustomBinaryUpload = async (event: Event) => {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-
-    const proj = localProject();
-    setBinaryBusy(true);
-    setBinaryUploadNotice(null);
-
-    try {
-      const buffer = await file.arrayBuffer();
-      const base64Data = arrayBufferToBase64(buffer);
-
-      const response = await fetch(`/api/modules/aegis/projects/${proj.id}/binary-upload`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fileName: file.name,
-          fileSizeBytes: file.size,
-          base64Data,
-          dataBase64: base64Data,
-          contentBase64: base64Data,
-        }),
-      });
-
-      if (response.ok) {
-        const raw = (await response.json()) as Record<string, unknown>;
-        if (raw.project && typeof raw.project === "object") {
-          setLocalProject(raw.project as AegisProject);
-        } else if (raw.binaryAnalysis && typeof raw.binaryAnalysis === "object") {
-          setLocalProject({
-            ...proj,
-            binaryAnalysis: raw.binaryAnalysis as AegisBinaryAnalysis,
-          });
-        } else if (typeof raw.sha256Before === "string" && typeof raw.sha256After === "string") {
-          setLocalProject({
-            ...proj,
-            binaryAnalysis: raw as unknown as AegisBinaryAnalysis,
-          });
-        }
-        setBinaryUploadNotice(
-          `Uploaded & hot-patched ${file.name} (${(file.size / 1024).toFixed(1)} KB) — real SHA-256 & disassembly diff updated.`,
-        );
-      }
-    } finally {
-      input.value = "";
-      setBinaryBusy(false);
-    }
-  };
-
-  // Tab 3 Handler: Fire simulated attack against route shield
-  const handleFireAttack = async () => {
-    const res = await props.onTestAttack(attackPayload());
-    if (res) {
-      setAttackResult(res);
-    }
-  };
-
-  // Tab 3 Handler: Save Live WAF Regex & Rate-Limit Rule
-  const handleSaveShieldRule = async () => {
-    const proj = localProject();
-    if (!proj.routeShield) return;
-    setRuleSaveBusy(true);
-    setRuleSaveStatus(null);
-
-    try {
-      const payload = {
-        protectedPath: editProtectedPath().trim(),
-        blockPatternRegex: editBlockPatternRegex().trim(),
-        rateLimitRps: Number(editRateLimitRps()) || 25,
-      };
-
-      const response = await fetch(`/api/modules/aegis/projects/${proj.id}/shield-rule`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (response.ok) {
-        const raw = (await response.json()) as Record<string, unknown>;
-        if (raw.project && typeof raw.project === "object") {
-          setLocalProject(raw.project as AegisProject);
-        } else if (raw.routeShield && typeof raw.routeShield === "object") {
-          setLocalProject({
-            ...proj,
-            routeShield: raw.routeShield as AegisRouteShieldRule,
-          });
-        } else {
-          setLocalProject({
-            ...proj,
-            routeShield: {
-              ...proj.routeShield,
-              protectedPath: payload.protectedPath,
-              blockPatternRegex: payload.blockPatternRegex,
-              rateLimitRps: payload.rateLimitRps,
-            },
-          });
-        }
-        setRuleSaveStatus("✓ Live WAF Regex & Rate-Limit Rule deployed to edge gateway");
-      } else {
-        setLocalProject({
-          ...proj,
-          routeShield: {
-            ...proj.routeShield,
-            protectedPath: payload.protectedPath,
-            blockPatternRegex: payload.blockPatternRegex,
-            rateLimitRps: payload.rateLimitRps,
-          },
-        });
-        setRuleSaveStatus("✓ Live WAF Regex & Rate-Limit Rule updated in place");
-      }
-    } finally {
-      setRuleSaveBusy(false);
-    }
-  };
-
-  // Tab 3 Handler: Test Live Reverse-Proxy Gateway (/shield-proxy)
-  const handleTestLiveProxyGateway = async () => {
-    const proj = localProject();
-    const currentPayload = attackPayload();
-    setProxyBusy(true);
-    const startMs = performance.now();
-    const proxyPath = `/api/modules/aegis/shield-proxy/${proj.id}/api/v1/webhooks/preview`;
-    const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost:8787";
-    const curlCommand = `curl -i -X POST "${origin}${proxyPath}" -H "Content-Type: application/json" -d '${JSON.stringify({ payload: currentPayload })}'`;
-
-    try {
-      const response = await fetch(`${proxyPath}?payload=${encodeURIComponent(currentPayload)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Aegis-Test-Payload": currentPayload,
-        },
-        body: JSON.stringify({
-          payload: currentPayload,
-          targetUrl: currentPayload,
-        }),
-      });
-      const latencyMs = Math.max(1, Math.round(performance.now() - startMs));
-      const bodyText = await response.text();
-      const isBlocked =
-        response.status === 403 || response.status === 429 || bodyText.includes("BLOCKED");
-
-      setProxyResult({
-        httpStatus: response.status,
-        verdict: isBlocked ? "BLOCKED_GREEN" : "EXPLOITED_RED",
-        latencyMs,
-        responseBody: bodyText,
-        curlCommand,
-      });
-    } catch {
-      const shieldEnabled = proj.routeShield?.enabled ?? true;
-      setProxyResult({
-        httpStatus: shieldEnabled ? 403 : 200,
-        verdict: shieldEnabled ? "BLOCKED_GREEN" : "EXPLOITED_RED",
-        latencyMs: 2,
-        responseBody: JSON.stringify(
-          {
-            gateway: "AEGIS-4 Live Reverse-Proxy Shield",
-            status: shieldEnabled ? "BLOCKED_GREEN" : "BYPASSED_RED",
-            ruleId: proj.routeShield?.ruleId ?? "AEGIS-WAF-001",
-            inspectedPath: "/api/v1/webhooks/preview",
-          },
-          null,
-          2,
-        ),
-        curlCommand,
-      });
-    } finally {
-      setProxyBusy(false);
-    }
-  };
-
-  const severityBadgeClass = (severity: string) => {
-    if (severity === "critical") {
-      return "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400";
-    }
-    if (severity === "high") {
-      return "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400";
-    }
-    return "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400";
-  };
+  const timelineSteps = () =>
+    props.liveSteps.length > 0 ? props.liveSteps : props.project.timeline;
 
   return (
-    <div class="flex flex-col gap-y-5">
-      {/* 1. Top Vulnerability Root Cause & Red/Green PoC Comparison Card */}
-      <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
-        <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
-          <div class="flex items-center gap-x-2.5">
-            <span class="inline-flex items-center justify-center size-8 rounded-lg bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 font-bold text-sm">
-              PoC
-            </span>
-            <div>
-              <h3 class="text-sm md:text-base font-semibold text-gray-800 dark:text-neutral-100">
-                Vulnerability Root Cause &amp; Red/Green PoC Verification
-              </h3>
-              <p class="text-xs text-gray-500 dark:text-neutral-400">
-                Deterministic sandbox exploit reproduction before and after autonomous patch
-                synthesis
-              </p>
-            </div>
-          </div>
-          <div class="flex items-center gap-x-2">
-            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-              ✓ Zero-False-Positive Verified
-            </span>
-            <button
-              type="button"
-              disabled={props.busy}
-              onClick={() => props.onRunScan(activeTab())}
-              class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50 cursor-pointer transition-colors disabled:opacity-50"
-            >
-              {props.busy ? "Synthesizing..." : "↻ Re-Verify Active Mode"}
-            </button>
-          </div>
+    <div class="space-y-6">
+      {/* Segmented Remediation Mode Bar (DESIGN.md 40px Pill Filter Chips) */}
+      <div class="bg-[#F8F9FA] dark:bg-[#212329]/60 border border-[#EAECF0] dark:border-[#252830] rounded-[16px] p-5 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+        <div>
+          <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4F46E5] dark:text-[#818CF8]">
+            Remediation &amp; Runtime Defense
+          </span>
+          <h3 class="text-[20px] leading-[28px] font-semibold tracking-[-0.015em] text-[#111827] dark:text-[#F3F4F6] mt-0.5">
+            Verified Patch Artifacts &amp; Virtual WAF Shielding
+          </h3>
         </div>
 
-        <div class="p-4 md:p-5 flex flex-col gap-y-5">
-          <For each={localProject().vulnerabilities}>
-            {(vuln) => (
-              <div class="flex flex-col gap-y-4">
-                <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-gray-100 dark:border-neutral-800">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class={severityBadgeClass(vuln.severity)}>
-                      {vuln.severity.toUpperCase()} • CVSS {vuln.cvssScore.toFixed(1)}
-                    </span>
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-mono font-medium bg-gray-100 text-gray-800 dark:bg-neutral-800 dark:text-neutral-300">
-                      {vuln.cveOrCwe}
-                    </span>
-                    <span class="text-sm font-semibold text-gray-800 dark:text-neutral-200">
-                      {vuln.title}
-                    </span>
-                    <Show when={vuln.zeroFalsePositiveConfirmed}>
-                      <span class="inline-flex items-center gap-x-1 py-0.5 px-2 rounded-full text-[11px] font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                        Zero-False-Positive Verified
-                      </span>
-                    </Show>
-                  </div>
-                  <code class="text-xs font-mono px-2.5 py-1 rounded-md bg-gray-100 text-gray-700 dark:bg-neutral-800 dark:text-neutral-300">
-                    📍 {vuln.location}
-                  </code>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div class="p-3 rounded-lg bg-gray-50 border border-gray-200 dark:bg-neutral-950/60 dark:border-neutral-800">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400 mb-1">
-                      Root Cause Analysis
-                    </div>
-                    <p class="text-xs md:text-sm text-gray-700 dark:text-neutral-300 leading-relaxed">
-                      {vuln.rootCause}
-                    </p>
-                  </div>
-                  <div class="p-3 rounded-lg bg-gray-50 border border-gray-200 dark:bg-neutral-950/60 dark:border-neutral-800">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400 mb-1">
-                      Attack Vector &amp; Trigger
-                    </div>
-                    <p class="text-xs md:text-sm text-gray-700 dark:text-neutral-300 leading-relaxed">
-                      {vuln.attackVector}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Side-by-Side Red vs Green Sandbox Terminals */}
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div class="bg-neutral-950 border border-red-900/60 rounded-xl p-3.5 flex flex-col gap-y-2">
-                    <div class="flex items-center justify-between border-b border-red-950/80 pb-2">
-                      <span class="text-xs font-semibold text-red-400">
-                        🔴 RED: Sandbox PoC Exploit Log
-                      </span>
-                      <span class="inline-flex items-center py-0.5 px-2 rounded-full text-[11px] font-mono bg-red-950/80 text-red-300 border border-red-800/50">
-                        EXPLOIT CONFIRMED
-                      </span>
-                    </div>
-                    <div class="text-[11px] font-mono text-amber-300/90 bg-neutral-900/90 px-2.5 py-1.5 rounded border border-neutral-800 overflow-x-auto">
-                      <span class="text-neutral-500 select-none">$ payload: </span>
-                      {vuln.pocPayload}
-                    </div>
-                    <pre class="text-xs font-mono text-red-200/90 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                      {vuln.pocRedLog}
-                    </pre>
-                  </div>
-
-                  <div class="bg-neutral-950 border border-teal-900/60 rounded-xl p-3.5 flex flex-col gap-y-2">
-                    <div class="flex items-center justify-between border-b border-teal-950/80 pb-2">
-                      <span class="text-xs font-semibold text-teal-400">
-                        🟢 GREEN: Post-Remediation Verification Log
-                      </span>
-                      <span class="inline-flex items-center py-0.5 px-2 rounded-full text-[11px] font-mono bg-teal-950/80 text-teal-300 border border-teal-800/50">
-                        PATCH VERIFIED
-                      </span>
-                    </div>
-                    <pre class="text-xs font-mono text-teal-200/90 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                      {vuln.verifyGreenLog}
-                    </pre>
-                  </div>
-                </div>
-              </div>
-            )}
-          </For>
+        <div
+          class="flex flex-wrap items-center gap-2"
+          role="tablist"
+          aria-label="Remediation Artifact Mode"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={props.expanded && activeTab() === "git"}
+            data-testid="remediation-tab-git-pr"
+            onClick={() => selectTab("git")}
+            class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+              props.expanded && activeTab() === "git"
+                ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+            }`}
+          >
+            Source Patch &amp; PR
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={props.expanded && activeTab() === "binary"}
+            data-testid="remediation-tab-binary-patch"
+            onClick={() => selectTab("binary")}
+            class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+              props.expanded && activeTab() === "binary"
+                ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+            }`}
+          >
+            ELF64 Binary Patch
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={props.expanded && activeTab() === "shield"}
+            data-testid="remediation-tab-route-shield"
+            onClick={() => selectTab("shield")}
+            class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+              props.expanded && activeTab() === "shield"
+                ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+            }`}
+          >
+            Edge Route Shield
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={props.expanded && activeTab() === "verification"}
+            data-testid="remediation-tab-verification-ops"
+            onClick={() => selectTab("verification")}
+            class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer inline-flex items-center gap-1.5 ${
+              props.expanded && activeTab() === "verification"
+                ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+            }`}
+          >
+            <span>Verification Sandbox</span>
+          </button>
         </div>
       </div>
 
-      {/* 2. Tri-Mode Remediation Switcher Tabs (Preline Segmented Pills) */}
-      <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
-        <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-col gap-y-3">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h3 class="text-sm md:text-base font-semibold text-gray-800 dark:text-neutral-100">
-                Tri-Mode Autonomous Remediation Workbench
-              </h3>
-              <p class="text-xs text-gray-500 dark:text-neutral-400">
-                Inspect or switch between White-Box Git PR, No-Source Binary Hard-Patching, and Live
-                Virtual Route Shielding
-              </p>
-            </div>
-            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-              Primary Mode: {localProject().remediationMode}
-            </span>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-2 bg-gray-100 p-1.5 rounded-xl dark:bg-neutral-950">
-            <button
-              type="button"
-              onClick={() => setActiveTab("git-pr")}
-              class={`py-2 px-3 inline-flex items-center justify-center gap-x-2 text-xs md:text-sm font-medium rounded-lg cursor-pointer transition-colors ${
-                activeTab() === "git-pr"
-                  ? "bg-white text-blue-600 shadow-2xs dark:bg-neutral-800 dark:text-blue-400"
-                  : "text-gray-600 hover:text-gray-800 dark:text-neutral-400 dark:hover:text-neutral-200"
-              }`}
-            >
-              🔀 Mode 1: Git Branch &amp; GitHub PR (White-Box)
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("binary-patch")}
-              class={`py-2 px-3 inline-flex items-center justify-center gap-x-2 text-xs md:text-sm font-medium rounded-lg cursor-pointer transition-colors ${
-                activeTab() === "binary-patch"
-                  ? "bg-white text-blue-600 shadow-2xs dark:bg-neutral-800 dark:text-blue-400"
-                  : "text-gray-600 hover:text-gray-800 dark:text-neutral-400 dark:hover:text-neutral-200"
-              }`}
-            >
-              🧬 Mode 2: Binary Hard-Patch &amp; Hex/ASM Diff (No-Source Binary)
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("route-shield")}
-              class={`py-2 px-3 inline-flex items-center justify-center gap-x-2 text-xs md:text-sm font-medium rounded-lg cursor-pointer transition-colors ${
-                activeTab() === "route-shield"
-                  ? "bg-white text-blue-600 shadow-2xs dark:bg-neutral-800 dark:text-blue-400"
-                  : "text-gray-600 hover:text-gray-800 dark:text-neutral-400 dark:hover:text-neutral-200"
-              }`}
-            >
-              🛡️ Mode 3: Live Route &amp; API Shield (Virtual Patching)
-            </button>
-          </div>
-        </div>
-
-        {/* 3. Tab 1 Content (git-pr) */}
-        <Show when={activeTab() === "git-pr"}>
+      {/* Focused Remediation Detail View (Only ONE active panel rendered when expanded) */}
+      <Show when={props.expanded}>
+        {/* Mode 1: Source Patch & GitHub Pull Request */}
+        <Show when={activeTab() === "git"}>
           <Show
-            when={localProject().gitPrReport}
+            when={props.project.gitPrReport}
             fallback={
-              <div class="p-6 text-center flex flex-col items-center gap-y-3">
-                <p class="text-sm text-gray-600 dark:text-neutral-400">
-                  Git PR report is not synthesized yet for this target.
-                </p>
-                <button
-                  type="button"
-                  disabled={props.busy}
-                  onClick={() => props.onRunScan("git-pr")}
-                  class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                >
-                  Synthesize Mode 1: Git Branch &amp; GitHub PR
-                </button>
-              </div>
+              <PrelineAlert variant="amber" title="Source Repository Not Attached">
+                This target uses no-source binary or live URL intake. Switch to{" "}
+                <strong>ELF64 Binary Patch</strong> or <strong>Edge Route Shield</strong> to inspect
+                active defenses.
+              </PrelineAlert>
             }
           >
-            {(report) => (
-              <div class="p-4 md:p-5 flex flex-col gap-y-5">
-                {/* Interactive Action Bar for Tab 1 */}
-                <div class="flex flex-col gap-y-3 p-3.5 rounded-xl bg-gray-50 border border-gray-200 dark:bg-neutral-950 dark:border-neutral-800">
-                  <div class="flex flex-wrap items-center justify-between gap-3">
-                    <div class="flex flex-wrap items-center gap-2.5">
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-mono font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                        🌿 {prSyncState()?.branchName ?? report().branchName}
-                      </span>
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                        PR #{prSyncState()?.prNumber ?? report().prNumber} •{" "}
-                        {prSyncState()?.status ?? report().status.toUpperCase()} •{" "}
-                        {report().ciChecksPassed ? "CI Checks Passed" : "CI Pending"}
-                      </span>
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-mono font-medium bg-gray-100 text-gray-800 dark:bg-neutral-800 dark:text-neutral-300">
-                        commit {report().commitSha}
-                      </span>
-                    </div>
-
-                    <div class="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={prBusy()}
-                        onClick={handleCreateOrSyncPr}
-                        class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                      >
-                        {prBusy() ? "Syncing PR..." : "🚀 Open / Sync GitHub PR"}
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={patchDownloading()}
-                        onClick={handleDownloadPatchFile}
-                        class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 disabled:opacity-50 cursor-pointer transition-colors"
-                      >
-                        {patchDownloading() ? "Downloading..." : "⬇️ Download .patch (git apply)"}
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={polishBusy()}
-                        onClick={handleRunPolishAudit}
-                        class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50 disabled:opacity-50 cursor-pointer transition-colors"
-                      >
-                        {polishBusy() ? "Auditing Rubric..." : "✨ Verify-Critique-Polish Audit"}
-                      </button>
-
-                      <a
-                        href={
-                          prSyncState()?.prUrl ||
-                          report().prUrl ||
-                          "https://github.com/eunhhu/deepmind-hackathon/pulls"
-                        }
-                        target="_blank"
-                        rel="noreferrer"
-                        class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer transition-colors"
-                      >
-                        ↗ View GitHub PR
-                      </a>
-                    </div>
-                  </div>
-
-                  {/* Copyable gh pr create CLI bar (always visible or highlighted when synced) */}
-                  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-gray-200 dark:border-neutral-800">
-                    <div class="flex items-center gap-x-2 overflow-x-auto">
-                      <span class="inline-flex items-center py-0.5 px-2 rounded-full text-[11px] font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400 shrink-0">
-                        #{prSyncState()?.prNumber ?? report().prNumber} •{" "}
-                        {prSyncState()?.branchName ?? report().branchName}
-                      </span>
-                      <code class="text-xs font-mono text-gray-700 dark:text-neutral-300 whitespace-nowrap">
-                        {prSyncState()?.cliCommand ??
-                          `gh pr create --base main --head ${report().branchName} --title "fix(security): autonomous AEGIS-4 remediation" --body-file .aegis/pr-${report().prNumber}.md`}
-                      </code>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copyToClipboard(
-                          "gh-pr-cli",
-                          prSyncState()?.cliCommand ??
-                            `gh pr create --base main --head ${report().branchName} --title "fix(security): autonomous AEGIS-4 remediation" --body-file .aegis/pr-${report().prNumber}.md`,
-                        )
-                      }
-                      class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50 cursor-pointer transition-colors shrink-0"
+            {(pr) => (
+              <PrelineCard
+                title={pr().prTitle}
+                subtitle={`Branch: ${pr().branchName} • Commit: ${pr().commitSha} • Target File: ${pr().codeDiff.filePath}`}
+                headerRight={
+                  <div class="flex flex-wrap items-center gap-2">
+                    <PrelineBadge variant={pr().ciChecksPassed ? "emerald" : "amber"} dot>
+                      {pr().status === "draft"
+                        ? "Verified & Ready for PR"
+                        : `PR #${pr().prNumber} Opened`}
+                    </PrelineBadge>
+                    <a
+                      href={getAegisPatchDownloadUrl(props.project.id)}
+                      download={`${props.project.id}.patch`}
+                      data-testid="download-patch-link"
+                      class="h-10 px-4 inline-flex items-center gap-2 text-[14px] leading-[20px] font-semibold rounded-[12px] border border-[#DFE3E8] bg-white text-[#111827] hover:bg-[#F8F9FA] dark:bg-[#17181C] dark:border-[#2E323C] dark:text-[#F3F4F6] transition-all"
                     >
-                      {copiedTextKey() === "gh-pr-cli" ? "✓ Copied CLI" : "📋 Copy gh pr create"}
-                    </button>
+                      Download .patch
+                    </a>
+                    <PrelineButton
+                      variant="primary"
+                      size="sm"
+                      data-testid="create-pr-btn"
+                      disabled={creatingPr()}
+                      onClick={handleCreatePr}
+                    >
+                      {creatingPr()
+                        ? "Opening PR..."
+                        : pr().status === "open"
+                          ? `Update PR #${pr().prNumber}`
+                          : "Create Pull Request"}
+                    </PrelineButton>
                   </div>
-                </div>
+                }
+              >
+                <div class="space-y-5">
+                  <Show when={prResult()}>
+                    {(created) => (
+                      <div
+                        data-testid="pr-created-banner"
+                        class="rounded-[12px] p-4 bg-[#DCFCE7] border border-[#15803D]/25 text-[14px] leading-[20px] text-[#15803D] dark:bg-[#053C01] dark:border-[#B0F4B2]/25 dark:text-[#B0F4B2] flex flex-wrap items-center justify-between gap-2"
+                      >
+                        <div>
+                          <span class="font-semibold">
+                            GitHub Pull Request #{created().prNumber} Created:
+                          </span>{" "}
+                          <span>{created().prTitle}</span>
+                        </div>
+                        <span class="font-mono text-[13px] underline">{created().prUrl}</span>
+                      </div>
+                    )}
+                  </Show>
 
-                {/* Verify-Critique-Polish 3-Point Security Patch Quality Rubric Result */}
-                <Show when={polishAudit()}>
-                  {(audit) => (
-                    <div class="p-4 rounded-xl border border-blue-200 bg-blue-50/50 dark:bg-neutral-950 dark:border-blue-900/60 flex flex-col gap-y-3">
-                      <div class="flex flex-wrap items-center justify-between gap-2">
-                        <div class="flex items-center gap-x-2">
-                          <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                            ✨ Verify-Critique-Polish Rubric Verified
+                  <div class="bg-[#F2F4F7] dark:bg-[#212329] rounded-[12px] p-4 border border-[#EAECF0] dark:border-[#252830] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <h4 class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF] mb-1">
+                        Minimal-Diff Remediation Summary
+                      </h4>
+                      <p class="text-[14px] leading-[22px] text-[#111827] dark:text-[#F3F4F6]">
+                        {pr().codeDiff.explanation}
+                      </p>
+                    </div>
+
+                    {/* Segmented Diff Mode Switcher */}
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setDiffViewMode("split")}
+                        class={`h-8 px-3 rounded-full text-[13px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                          diffViewMode() === "split"
+                            ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                            : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                        }`}
+                      >
+                        Side-by-Side Diff
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDiffViewMode("unified")}
+                        class={`h-8 px-3 rounded-full text-[13px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                          diffViewMode() === "unified"
+                            ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                            : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                        }`}
+                      >
+                        Unified .patch
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Before vs After Code Comparison */}
+                  <Show when={diffViewMode() === "split"}>
+                    <div
+                      data-testid="code-diff-viewer"
+                      class="grid grid-cols-1 lg:grid-cols-2 gap-4"
+                    >
+                      <div class="rounded-[12px] border border-[#B91C1C]/25 bg-[#FEE2E2]/35 dark:bg-[#7F1D1D]/20 dark:border-[#FECACA]/20 overflow-hidden">
+                        <div class="px-4 py-2.5 bg-[#FEE2E2] dark:bg-[#7F1D1D]/50 border-b border-[#B91C1C]/20 flex items-center justify-between">
+                          <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#B91C1C] dark:text-[#FECACA]">
+                            Vulnerable Source (Before)
                           </span>
-                          <span class="text-xs md:text-sm font-bold text-gray-800 dark:text-neutral-100 font-mono">
-                            Score: {audit().initialScore.toFixed(1)} -&gt;{" "}
-                            {audit().finalScore.toFixed(1)}/10
+                          <span class="font-mono text-[13px] text-[#B91C1C] dark:text-[#FECACA]">
+                            {pr().codeDiff.filePath}
                           </span>
                         </div>
-                        <span class="text-xs text-gray-600 dark:text-neutral-400">
-                          {audit().summary}
+                        <pre class="p-4 text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] overflow-x-auto whitespace-pre-wrap">
+                          {pr().codeDiff.beforeCode}
+                        </pre>
+                      </div>
+
+                      <div class="rounded-[12px] border border-[#15803D]/25 bg-[#DCFCE7]/35 dark:bg-[#053C01]/25 dark:border-[#B0F4B2]/20 overflow-hidden">
+                        <div class="px-4 py-2.5 bg-[#DCFCE7] dark:bg-[#053C01]/60 border-b border-[#15803D]/20 flex items-center justify-between">
+                          <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#15803D] dark:text-[#B0F4B2]">
+                            Verified Remediation (After)
+                          </span>
+                          <span class="font-mono text-[13px] text-[#15803D] dark:text-[#B0F4B2]">
+                            AST Minimal Diff
+                          </span>
+                        </div>
+                        <pre class="p-4 text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] overflow-x-auto whitespace-pre-wrap">
+                          {pr().codeDiff.afterCode}
+                        </pre>
+                      </div>
+                    </div>
+                  </Show>
+
+                  {/* Unified Git Patch */}
+                  <Show when={diffViewMode() === "unified"}>
+                    <div
+                      data-testid="code-diff-viewer"
+                      class="rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] overflow-hidden"
+                    >
+                      <div class="px-4 py-2.5 border-b border-[#EAECF0] dark:border-[#252830] flex items-center justify-between">
+                        <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF]">
+                          Unified Git Diff Patch
+                        </span>
+                        <span class="font-mono text-[13px] text-[#15803D] dark:text-[#B0F4B2]">
+                          git apply ready
                         </span>
                       </div>
-
-                      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <For each={audit().items}>
-                          {(item) => (
-                            <div class="p-3 rounded-lg bg-white border border-gray-200 dark:bg-neutral-900 dark:border-neutral-800 flex flex-col gap-y-1.5">
-                              <div class="flex items-center justify-between gap-2">
-                                <span class="text-xs font-semibold text-gray-800 dark:text-neutral-200">
-                                  {item.dimension}
-                                </span>
-                                <span class="inline-flex items-center py-0.5 px-2 rounded-full text-[11px] font-mono font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                                  {item.scoreLabel}
-                                </span>
-                              </div>
-                              <p class="text-xs text-amber-700 dark:text-amber-400 font-mono">
-                                Critique: {item.beforeNote}
-                              </p>
-                              <p class="text-xs text-teal-700 dark:text-teal-400 font-mono">
-                                Polish: {item.afterNote}
-                              </p>
-                            </div>
-                          )}
-                        </For>
-                      </div>
-                    </div>
-                  )}
-                </Show>
-
-                <div>
-                  <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                    <h4 class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-                      Side-by-Side Source Code Diff ({report().codeDiff.filePath})
-                    </h4>
-                    <span class="text-xs text-teal-600 dark:text-teal-400 font-medium">
-                      {report().codeDiff.explanation}
-                    </span>
-                  </div>
-                  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <div class="bg-neutral-950 border border-red-900/60 rounded-xl p-3.5 flex flex-col gap-y-2">
-                      <div class="text-xs font-semibold text-red-400 border-b border-red-950 pb-1.5">
-                        − Vulnerable Source (Before Patch)
-                      </div>
-                      <pre class="text-xs font-mono text-red-200/90 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                        {report().codeDiff.beforeCode}
+                      <pre class="p-4 text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] overflow-x-auto whitespace-pre">
+                        {pr().codeDiff.unifiedDiff}
                       </pre>
                     </div>
-                    <div class="bg-neutral-950 border border-teal-900/60 rounded-xl p-3.5 flex flex-col gap-y-2">
-                      <div class="text-xs font-semibold text-teal-400 border-b border-teal-950 pb-1.5">
-                        + Patched Source (AST-Verified Remediation)
-                      </div>
-                      <pre class="text-xs font-mono text-teal-200/90 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                        {report().codeDiff.afterCode}
-                      </pre>
-                    </div>
-                  </div>
+                  </Show>
                 </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div class="bg-neutral-950 border border-neutral-800 rounded-xl p-3.5 flex flex-col gap-y-2">
-                    <div class="text-xs font-semibold text-neutral-300 border-b border-neutral-800 pb-1.5">
-                      Unified Git Patch Diff (aegis-fix-{localProject().id}.patch)
-                    </div>
-                    <pre class="text-xs font-mono text-neutral-300 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                      {report().codeDiff.unifiedDiff}
-                    </pre>
-                  </div>
-                  <div class="bg-gray-50 border border-gray-200 dark:bg-neutral-950 dark:border-neutral-800 rounded-xl p-3.5 flex flex-col gap-y-2">
-                    <div class="text-xs font-semibold text-gray-700 dark:text-neutral-300 border-b border-gray-200 dark:border-neutral-800 pb-1.5">
-                      Automated GitHub PR Markdown Comment Preview
-                    </div>
-                    <pre class="text-xs font-mono text-gray-700 dark:text-neutral-300 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                      {report().markdownComment}
-                    </pre>
-                  </div>
-                </div>
-              </div>
+              </PrelineCard>
             )}
           </Show>
         </Show>
 
-        {/* 4. Tab 2 Content (binary-patch) */}
-        <Show when={activeTab() === "binary-patch"}>
+        {/* Mode 2: ELF64 Binary Disassembly & Byte-Level Hot Patch */}
+        <Show when={activeTab() === "binary"}>
           <Show
-            when={localProject().binaryAnalysis}
+            when={props.project.binaryAnalysis}
             fallback={
-              <div class="p-6 text-center flex flex-col items-center gap-y-3">
-                <p class="text-sm text-gray-600 dark:text-neutral-400">
-                  Binary Hard-Patch analysis is not synthesized yet for this target.
-                </p>
-                <button
-                  type="button"
-                  disabled={props.busy}
-                  onClick={() => props.onRunScan("binary-patch")}
-                  class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                >
-                  Synthesize Mode 2: Binary Hard-Patch
-                </button>
-              </div>
+              <PrelineAlert variant="amber" title="No ELF/PE Binary Artifact Attached">
+                Select a no-source binary target or upload an ELF64 executable to inspect
+                instruction-level hot-patching.
+              </PrelineAlert>
             }
           >
-            {(binary) => (
-              <div class="p-4 md:p-5 flex flex-col gap-y-5">
-                <div class="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-gray-50 border border-gray-200 dark:bg-neutral-950 dark:border-neutral-800">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                      Format: {binary().format}
-                    </span>
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-neutral-800 dark:text-neutral-300">
-                      {binary().fileName} ({(binary().fileSizeBytes / 1024).toFixed(1)} KB)
-                    </span>
-                    <For each={binary().dangerousSinks}>
-                      {(sink) => (
-                        <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-mono font-medium bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400">
-                          ⚠️ Sink: {sink}
+            {(bin) => (
+              <PrelineCard
+                title={`Binary Patch Artifact: ${bin().fileName} (${bin().architecture})`}
+                subtitle={`Size: ${(bin().sizeBytes / 1024).toFixed(1)} KB • Sinks Neutralized: ${bin().dangerousSinks.join(", ")}`}
+                headerRight={
+                  <a
+                    href={getAegisBinaryDownloadUrl(props.project.id)}
+                    download={`patched-${bin().fileName}`}
+                    data-testid="download-binary-link"
+                    class="h-10 px-4 inline-flex items-center gap-2 text-[14px] leading-[20px] font-semibold rounded-[12px] bg-[#4F46E5] text-white hover:bg-[#4338CA] dark:bg-[#818CF8] dark:text-[#111214] transition-all"
+                  >
+                    Download Patched ELF64 Binary
+                  </a>
+                }
+              >
+                <div class="space-y-6">
+                  {/* Protection Flags & SHA256 Digest Comparison */}
+                  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div class="p-4 rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] space-y-2">
+                      <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF]">
+                        ELF Security Flags
+                      </span>
+                      <div class="flex flex-wrap gap-2">
+                        <PrelineBadge variant={bin().protections.nx ? "emerald" : "red"}>
+                          NX: {bin().protections.nx ? "ENABLED" : "DISABLED"}
+                        </PrelineBadge>
+                        <PrelineBadge variant={bin().protections.pie ? "emerald" : "amber"}>
+                          PIE: {bin().protections.pie ? "ENABLED" : "DISABLED"}
+                        </PrelineBadge>
+                        <PrelineBadge variant={bin().protections.stackCanary ? "emerald" : "red"}>
+                          Canary: {bin().protections.stackCanary ? "PRESENT" : "MISSING"}
+                        </PrelineBadge>
+                        <PrelineBadge variant="blue">
+                          RELRO: {bin().protections.relro.toUpperCase()}
+                        </PrelineBadge>
+                      </div>
+                    </div>
+
+                    <div class="p-4 rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] font-mono text-[13px] leading-[20px] space-y-1.5">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="text-[#B91C1C] dark:text-[#FECACA] font-semibold">
+                          SHA256 Before:
                         </span>
-                      )}
-                    </For>
-                  </div>
-
-                  <div class="flex flex-wrap items-center gap-2">
-                    <label for="aegis-binary-upload-input" class="sr-only">
-                      Upload Custom Binary (ELF64 / PE32+ / Mach-O)
-                    </label>
-                    <input
-                      ref={(el) => {
-                        binaryFileInputRef = el;
-                      }}
-                      id="aegis-binary-upload-input"
-                      type="file"
-                      class="hidden"
-                      onChange={handleCustomBinaryUpload}
-                    />
-                    <button
-                      type="button"
-                      disabled={binaryBusy()}
-                      onClick={() => binaryFileInputRef?.click()}
-                      class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 disabled:opacity-50 cursor-pointer transition-colors"
-                    >
-                      {binaryBusy()
-                        ? "Analyzing Binary..."
-                        : "📤 Upload Custom Binary (ELF64 / PE32+ / Mach-O)"}
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={binaryBusy()}
-                      onClick={handleDownloadPatchedBinary}
-                      class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                    >
-                      ⬇️ Download Patched Binary (-aegis-patched)
-                    </button>
-                  </div>
-                </div>
-
-                <Show when={binaryUploadNotice()}>
-                  {(notice) => (
-                    <div class="p-3 rounded-xl border border-teal-500/40 bg-teal-50/80 dark:bg-teal-950/40 dark:border-teal-800 text-xs font-medium text-teal-800 dark:text-teal-300">
-                      ✓ {notice()}
-                    </div>
-                  )}
-                </Show>
-
-                {/* SHA-256 & Memory Protections */}
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div class="p-3.5 rounded-xl bg-gray-50 border border-gray-200 dark:bg-neutral-950 dark:border-neutral-800 flex flex-col gap-y-2">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-                      Cryptographic Binary Integrity (SHA-256)
-                    </div>
-                    <div class="text-xs font-mono text-red-600 dark:text-red-400 break-all">
-                      <span class="font-semibold">SHA-256 Before: </span>
-                      {binary().sha256Before}
-                    </div>
-                    <div class="text-xs font-mono text-teal-600 dark:text-teal-400 break-all">
-                      <span class="font-semibold">SHA-256 After: </span>
-                      {binary().sha256After}
+                        <span class="text-[#4B5563] dark:text-[#9CA3AF] truncate max-w-[260px]">
+                          {bin().sha256Before}
+                        </span>
+                      </div>
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="text-[#15803D] dark:text-[#B0F4B2] font-semibold">
+                          SHA256 After:
+                        </span>
+                        <span class="text-[#111827] dark:text-[#F3F4F6] truncate max-w-[260px]">
+                          {bin().sha256After}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
-                  <div class="p-3.5 rounded-xl bg-gray-50 border border-gray-200 dark:bg-neutral-950 dark:border-neutral-800 flex flex-col gap-y-2">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-                      ELF / PE Binary Hardening &amp; Memory Protections
-                    </div>
-                    <div class="flex flex-wrap items-center gap-2">
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                        NX: {binary().protections.nxEnabled ? "ENABLED" : "DISABLED"}
-                      </span>
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                        PIE: {binary().protections.pieEnabled ? "ENABLED" : "DISABLED"}
-                      </span>
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-                        Stack Canary: {binary().protections.stackCanary ? "ENABLED" : "MISSING"}
-                      </span>
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                        RELRO: {binary().protections.relro.toUpperCase()}
-                      </span>
-                    </div>
+                  {/* Byte-Level Disassembly Patch Table */}
+                  <div
+                    data-testid="binary-patch-table"
+                    class="overflow-x-auto border border-[#EAECF0] dark:border-[#252830] rounded-[12px]"
+                  >
+                    <table class="min-w-full divide-y divide-[#EAECF0] dark:divide-[#252830] text-[13px] leading-[20px]">
+                      <thead class="bg-[#F2F4F7] dark:bg-[#212329]">
+                        <tr>
+                          <th class="px-4 py-3 text-left font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                            Offset
+                          </th>
+                          <th class="px-4 py-3 text-left font-semibold text-[#B91C1C] dark:text-[#FECACA]">
+                            Original Instruction / Bytes
+                          </th>
+                          <th class="px-4 py-3 text-left font-semibold text-[#15803D] dark:text-[#B0F4B2]">
+                            Patched Instruction / Bytes
+                          </th>
+                          <th class="px-4 py-3 text-left font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                            Engineering Rationale
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody class="divide-y divide-[#EAECF0] dark:divide-[#252830] bg-white dark:bg-[#17181C]">
+                        <For each={bin().patchInstructions}>
+                          {(inst) => (
+                            <tr>
+                              <td class="px-4 py-3 font-mono font-semibold text-[#4F46E5] dark:text-[#818CF8]">
+                                {inst.offsetHex}
+                              </td>
+                              <td class="px-4 py-3 font-mono text-[#B91C1C] dark:text-[#FECACA]">
+                                <div>{inst.beforeAsm}</div>
+                                <div class="text-[12px] opacity-75">[{inst.beforeBytesHex}]</div>
+                              </td>
+                              <td class="px-4 py-3 font-mono text-[#15803D] dark:text-[#B0F4B2]">
+                                <div>{inst.afterAsm}</div>
+                                <div class="text-[12px] opacity-75">[{inst.afterBytesHex}]</div>
+                              </td>
+                              <td class="px-4 py-3 text-[#4B5563] dark:text-[#9CA3AF]">
+                                {inst.rationale}
+                              </td>
+                            </tr>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
                   </div>
                 </div>
-
-                {/* Cryptographic SHA-256 Integrity Verification Callout */}
-                <div class="p-4 rounded-xl bg-neutral-950 border border-teal-900/60 flex flex-col gap-y-2">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <span class="text-xs font-semibold text-teal-400">
-                      🔐 Cryptographic SHA-256 Integrity Verification
-                    </span>
-                    <div class="flex items-center gap-x-2">
-                      <span class="inline-flex items-center gap-x-1.5 py-0.5 px-2.5 rounded-full text-[11px] font-medium bg-teal-950 text-teal-300 border border-teal-800/60">
-                        ✓ Matches SHA-256 After ({binary().sha256After.slice(0, 12)}…)
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          copyToClipboard(
-                            "shasum-cmd",
-                            `shasum -a 256 patched-${binary().fileName}`,
-                          )
-                        }
-                        class="py-1 px-2 inline-flex items-center gap-x-1 text-[11px] font-medium rounded-md bg-blue-900/40 text-blue-300 hover:bg-blue-900/60 cursor-pointer transition-colors"
-                      >
-                        {copiedTextKey() === "shasum-cmd" ? "✓ Copied" : "📋 Copy Command"}
-                      </button>
-                    </div>
-                  </div>
-                  <pre class="text-xs font-mono text-teal-200/90 overflow-x-auto whitespace-pre-wrap">
-                    {`$ shasum -a 256 patched-${binary().fileName}\n${binary().sha256After}  patched-${binary().fileName}`}
-                  </pre>
-                </div>
-
-                {/* Binary Offset & Disassembly Side-by-Side Diff Table */}
-                <div class="overflow-x-auto border border-gray-200 rounded-xl dark:border-neutral-800">
-                  <table class="min-w-full divide-y divide-gray-200 dark:divide-neutral-800">
-                    <thead class="bg-gray-50 dark:bg-neutral-950">
-                      <tr>
-                        <th class="px-4 py-2.5 text-start text-xs font-semibold uppercase text-gray-500 dark:text-neutral-400">
-                          Offset / Symbol
-                        </th>
-                        <th class="px-4 py-2.5 text-start text-xs font-semibold uppercase text-red-600 dark:text-red-400">
-                          Before (Hex &amp; objdump ASM)
-                        </th>
-                        <th class="px-4 py-2.5 text-start text-xs font-semibold uppercase text-teal-600 dark:text-teal-400">
-                          After Hard-Patch (Hex &amp; objdump ASM)
-                        </th>
-                        <th class="px-4 py-2.5 text-start text-xs font-semibold uppercase text-gray-500 dark:text-neutral-400">
-                          Patch Rationale
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200 dark:divide-neutral-800 bg-white dark:bg-neutral-900">
-                      <For each={binary().patchInstructions}>
-                        {(inst) => (
-                          <tr>
-                            <td class="px-4 py-3 whitespace-nowrap text-xs font-mono">
-                              <div class="font-bold text-gray-800 dark:text-neutral-200">
-                                {inst.offsetHex} ({inst.section})
-                              </div>
-                              <div class="text-gray-500 dark:text-neutral-400">
-                                {inst.functionName}
-                              </div>
-                            </td>
-                            <td class="px-4 py-3 text-xs font-mono bg-red-50/40 dark:bg-red-950/20">
-                              <div class="text-red-700 dark:text-red-300 font-semibold">
-                                {inst.beforeBytesHex}
-                              </div>
-                              <div class="text-red-600 dark:text-red-400">{inst.beforeAsm}</div>
-                            </td>
-                            <td class="px-4 py-3 text-xs font-mono bg-teal-50/40 dark:bg-teal-950/20">
-                              <div class="text-teal-700 dark:text-teal-300 font-semibold">
-                                {inst.afterBytesHex}
-                              </div>
-                              <div class="text-teal-600 dark:text-teal-400">{inst.afterAsm}</div>
-                            </td>
-                            <td class="px-4 py-3 text-xs text-gray-700 dark:text-neutral-300">
-                              {inst.rationale}
-                            </td>
-                          </tr>
-                        )}
-                      </For>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              </PrelineCard>
             )}
           </Show>
         </Show>
 
-        {/* 5. Tab 3 Content (route-shield) */}
-        <Show when={activeTab() === "route-shield"}>
+        {/* Mode 3: Edge Route Shield / Virtual WAF */}
+        <Show when={activeTab() === "shield"}>
           <Show
-            when={localProject().routeShield}
+            when={props.project.routeShield}
             fallback={
-              <div class="p-6 text-center flex flex-col items-center gap-y-3">
-                <p class="text-sm text-gray-600 dark:text-neutral-400">
-                  Live Route Shield is not synthesized yet for this target.
-                </p>
-                <button
-                  type="button"
-                  disabled={props.busy}
-                  onClick={() => props.onRunScan("route-shield")}
-                  class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                >
-                  Synthesize Mode 3: Live Route &amp; API Shield
-                </button>
-              </div>
+              <PrelineAlert variant="amber" title="No Route Shield Configured">
+                Run a security scan on a URL endpoint to synthesize edge WAF rules and reverse-proxy
+                snippets.
+              </PrelineAlert>
             }
           >
             {(shield) => (
-              <div class="p-4 md:p-5 flex flex-col gap-y-5">
-                {/* Route Shield Metadata Bar */}
-                <div class="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-gray-50 border border-gray-200 dark:bg-neutral-950 dark:border-neutral-800">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-mono font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                      Rule: {shield().ruleId}
-                    </span>
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-mono font-medium bg-gray-100 text-gray-800 dark:bg-neutral-800 dark:text-neutral-200">
-                      {shield().methods.join("/")} {shield().protectedPath}
-                    </span>
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-                      Rate Limit: {shield().rateLimitRps} RPS
-                    </span>
-                    <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                      Blocked Attacks: {shield().blockedRequestsCount}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={props.busy}
-                    onClick={() => props.onToggleShield(!shield().enabled)}
-                    class={
-                      shield().enabled
-                        ? "py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-teal-600 text-white hover:bg-teal-700 cursor-pointer transition-colors"
-                        : "py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-amber-600 text-white hover:bg-amber-700 cursor-pointer transition-colors"
-                    }
-                  >
-                    {shield().enabled
-                      ? "🛡️ Route Shield: ACTIVE (ON)"
-                      : "⚠️ Route Shield: BYPASSED (OFF)"}
-                  </button>
-                </div>
-
-                {/* Live WAF Regex & Rate-Limit Rule Editor */}
-                <div class="p-4 rounded-xl border border-gray-200 bg-gray-50/70 dark:bg-neutral-950 dark:border-neutral-800 flex flex-col gap-y-3">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <span class="text-xs font-semibold uppercase tracking-wide text-gray-700 dark:text-neutral-300">
-                      🛠️ Live WAF Regex &amp; Rate-Limit Rule Editor
-                    </span>
-                    <Show when={ruleSaveStatus()}>
-                      {(msg) => (
-                        <span class="inline-flex items-center gap-x-1.5 py-0.5 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                          {msg()}
-                        </span>
-                      )}
-                    </Show>
-                  </div>
-
-                  <div class="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-                    <div class="md:col-span-4">
-                      <label
-                        for="aegis-shield-protected-path"
-                        class="block text-xs font-medium text-gray-600 dark:text-neutral-400 mb-1"
-                      >
-                        Protected Route Path
-                      </label>
-                      <input
-                        id="aegis-shield-protected-path"
-                        type="text"
-                        value={editProtectedPath()}
-                        onInput={(e) => setEditProtectedPath(e.currentTarget.value)}
-                        class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                      />
-                    </div>
-
-                    <div class="md:col-span-5">
-                      <label
-                        for="aegis-shield-regex-pattern"
-                        class="block text-xs font-medium text-gray-600 dark:text-neutral-400 mb-1"
-                      >
-                        WAF Block Pattern Regex
-                      </label>
-                      <input
-                        id="aegis-shield-regex-pattern"
-                        type="text"
-                        value={editBlockPatternRegex()}
-                        onInput={(e) => setEditBlockPatternRegex(e.currentTarget.value)}
-                        class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                      />
-                    </div>
-
-                    <div class="md:col-span-3 flex items-end gap-2">
-                      <div class="w-24 shrink-0">
-                        <label
-                          for="aegis-shield-rate-limit"
-                          class="block text-xs font-medium text-gray-600 dark:text-neutral-400 mb-1"
-                        >
-                          Rate (RPS)
-                        </label>
-                        <input
-                          id="aegis-shield-rate-limit"
-                          type="number"
-                          min="1"
-                          max="10000"
-                          value={editRateLimitRps()}
-                          onInput={(e) =>
-                            setEditRateLimitRps(Number.parseInt(e.currentTarget.value, 10) || 1)
-                          }
-                          class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                        />
-                      </div>
-
-                      <button
-                        type="button"
-                        disabled={ruleSaveBusy()}
-                        onClick={handleSaveShieldRule}
-                        class="py-2 px-3 inline-flex items-center justify-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors flex-1"
-                      >
-                        {ruleSaveBusy() ? "Saving..." : "Save Live Rule"}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Interactive Live Route Shield Gateway & Attack Simulator */}
-                <div class="p-4 rounded-xl border border-gray-200 bg-gray-50/60 dark:bg-neutral-950 dark:border-neutral-800 flex flex-col gap-y-3">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <label
-                      for="aegis-live-attack-payload-input"
-                      class="text-xs font-semibold uppercase tracking-wide text-gray-700 dark:text-neutral-300"
+              <PrelineCard
+                title={`Virtual Patch Route Shield (${shield().ruleId})`}
+                subtitle={`Protected Path: ${shield().protectedPath} • Blocked Attacks: ${shield().blockedRequestsCount}`}
+                headerRight={
+                  <div class="flex items-center gap-2">
+                    <PrelineBadge
+                      variant={shield().enabled ? "emerald" : "red"}
+                      dot
+                      pulse={shield().enabled}
                     >
-                      Interactive Live Route Shield Gateway &amp; Attack Simulator
-                    </label>
-                    <span class="text-xs text-gray-500 dark:text-neutral-400">
-                      Toggle shield ON/OFF above and fire live exploit payload to verify runtime
-                      protection
-                    </span>
+                      {shield().enabled ? "SHIELD ACTIVE (403 BLOCK)" : "SHIELD BYPASSED"}
+                    </PrelineBadge>
+                    <PrelineButton
+                      variant={shield().enabled ? "danger" : "primary"}
+                      size="sm"
+                      data-testid="toggle-shield-btn"
+                      onClick={() => props.onToggleShield(!shield().enabled)}
+                    >
+                      {shield().enabled ? "Disable Route Shield" : "Enable Route Shield"}
+                    </PrelineButton>
                   </div>
-
-                  <div class="flex flex-col lg:flex-row gap-2">
-                    <input
-                      id="aegis-live-attack-payload-input"
-                      type="text"
-                      value={attackPayload()}
-                      onInput={(e) => setAttackPayload(e.currentTarget.value)}
-                      class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
-                      placeholder="Enter exploit payload..."
-                    />
-                    <div class="flex flex-wrap sm:flex-nowrap gap-2 shrink-0">
-                      <button
-                        type="button"
-                        disabled={props.busy}
-                        onClick={handleFireAttack}
-                        class="py-2 px-3 inline-flex items-center justify-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors shrink-0"
-                      >
-                        🚀 Fire Live Exploit Against Route
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={proxyBusy()}
-                        onClick={handleTestLiveProxyGateway}
-                        class="py-2 px-3 inline-flex items-center justify-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 disabled:opacity-50 cursor-pointer transition-colors shrink-0"
-                      >
-                        {proxyBusy()
-                          ? "Testing Gateway..."
-                          : "🌐 Test Live Reverse-Proxy Gateway (/shield-proxy)"}
-                      </button>
+                }
+              >
+                <div class="space-y-6">
+                  <div class="p-4 rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF] block">
+                        Active Block Pattern (Regex)
+                      </span>
+                      <code class="text-[13px] leading-[20px] font-mono text-[#4F46E5] dark:text-[#818CF8] break-all">
+                        {shield().blockPatternRegex}
+                      </code>
                     </div>
+                    <PrelineBadge variant="blue">
+                      Rate Limit: {shield().rateLimitRps} RPS
+                    </PrelineBadge>
                   </div>
 
-                  <Show when={attackResult()}>
-                    {(res) => (
-                      <div
-                        class={
-                          res().verdict === "BLOCKED_GREEN"
-                            ? "p-4 rounded-xl border border-teal-500/40 bg-teal-50/80 dark:bg-teal-950/40 dark:border-teal-800 flex flex-col gap-y-2"
-                            : "p-4 rounded-xl border border-red-500/40 bg-red-50/80 dark:bg-red-950/40 dark:border-red-800 flex flex-col gap-y-2"
-                        }
-                      >
-                        <div class="flex flex-wrap items-center justify-between gap-2">
-                          <span
-                            class={
-                              res().verdict === "BLOCKED_GREEN"
-                                ? "text-xs md:text-sm font-bold text-teal-800 dark:text-teal-300"
-                                : "text-xs md:text-sm font-bold text-red-800 dark:text-red-300"
-                            }
-                          >
-                            {res().verdict === "BLOCKED_GREEN"
-                              ? "HTTP 403 Forbidden — Blocked by AEGIS-4 Route Shield"
-                              : "HTTP 200 OK — RED: EXPLOIT SUCCEEDED (Shield OFF)"}
-                          </span>
-                          <span class="inline-flex items-center py-0.5 px-2 rounded-full text-xs font-mono bg-white/80 dark:bg-neutral-900 text-gray-700 dark:text-neutral-300">
-                            HTTP {res().httpStatus} • {res().latencyMs}ms
-                          </span>
-                        </div>
-                        <pre class="text-xs font-mono p-2.5 rounded-lg bg-neutral-950 text-neutral-200 overflow-x-auto whitespace-pre-wrap">
-                          {res().responseBody}
-                        </pre>
-                      </div>
-                    )}
-                  </Show>
-
-                  <Show when={proxyResult()}>
-                    {(proxy) => (
-                      <div
-                        class={
-                          proxy().verdict === "BLOCKED_GREEN"
-                            ? "p-4 rounded-xl border border-teal-500/40 bg-teal-50/80 dark:bg-teal-950/40 dark:border-teal-800 flex flex-col gap-y-2.5"
-                            : "p-4 rounded-xl border border-red-500/40 bg-red-50/80 dark:bg-red-950/40 dark:border-red-800 flex flex-col gap-y-2.5"
-                        }
-                      >
-                        <div class="flex flex-wrap items-center justify-between gap-2">
-                          <span
-                            class={
-                              proxy().verdict === "BLOCKED_GREEN"
-                                ? "text-xs md:text-sm font-bold text-teal-800 dark:text-teal-300"
-                                : "text-xs md:text-sm font-bold text-red-800 dark:text-red-300"
-                            }
-                          >
-                            {proxy().verdict === "BLOCKED_GREEN"
-                              ? "🌐 Reverse-Proxy Gateway (/shield-proxy): INTERCEPTED & BLOCKED (403)"
-                              : "🌐 Reverse-Proxy Gateway (/shield-proxy): FORWARDED UPSTREAM (Shield Bypassed)"}
-                          </span>
-                          <span class="inline-flex items-center py-0.5 px-2 rounded-full text-xs font-mono bg-white/80 dark:bg-neutral-900 text-gray-700 dark:text-neutral-300">
-                            HTTP {proxy().httpStatus} • {proxy().latencyMs}ms
-                          </span>
-                        </div>
-
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-neutral-900 border border-neutral-800">
-                          <code class="text-xs font-mono text-amber-300 overflow-x-auto whitespace-nowrap">
-                            {proxy().curlCommand}
-                          </code>
+                  {/* Multi-Target Edge Snippet Exporter */}
+                  <div>
+                    <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF]">
+                        Exportable Hot-Reload WAF Rules
+                      </span>
+                      <div class="flex flex-wrap gap-1.5">
+                        {(
+                          [
+                            ["cloudRunGin", "Cloud Run / Gin"],
+                            ["cloudArmor", "GCP Cloud Armor"],
+                            ["cloudflareWorker", "Cloudflare Worker"],
+                            ["nginx", "NGINX"],
+                            ["envoy", "Envoy Proxy"],
+                          ] as const
+                        ).map(([key, label]) => (
                           <button
                             type="button"
-                            onClick={() => copyToClipboard("proxy-curl", proxy().curlCommand)}
-                            class="py-1 px-2.5 inline-flex items-center gap-x-1 text-xs font-medium rounded-md bg-blue-900/40 text-blue-300 hover:bg-blue-900/60 cursor-pointer transition-colors shrink-0"
+                            onClick={() => setActiveSnippet(key)}
+                            class={`h-8 px-3 rounded-full text-[13px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                              activeSnippet() === key
+                                ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                                : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                            }`}
                           >
-                            {copiedTextKey() === "proxy-curl" ? "✓ Copied curl" : "📋 Copy curl"}
+                            {label}
                           </button>
-                        </div>
-
-                        <pre class="text-xs font-mono p-2.5 rounded-lg bg-neutral-950 text-neutral-200 overflow-x-auto whitespace-pre-wrap">
-                          {proxy().responseBody}
-                        </pre>
+                        ))}
                       </div>
-                    )}
-                  </Show>
-                </div>
-
-                {/* Exportable Edge Shield Snippets Selector */}
-                <div class="flex flex-col gap-y-2.5">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <span class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-                      Exportable Edge Shield Snippets Selector
-                    </span>
-                    <div class="flex flex-wrap gap-1.5">
-                      <For each={SHIELD_SNIPPET_OPTIONS}>
-                        {(option) => (
-                          <button
-                            type="button"
-                            onClick={() => setSelectedSnippetKey(option.key)}
-                            class={
-                              selectedSnippetKey() === option.key
-                                ? "py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400 cursor-pointer transition-colors"
-                                : "py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-300 cursor-pointer transition-colors"
-                            }
-                          >
-                            {option.label}
-                          </button>
-                        )}
-                      </For>
                     </div>
-                  </div>
-                  <div class="bg-neutral-950 border border-neutral-800 rounded-xl p-3.5">
-                    <div class="flex items-center justify-between border-b border-neutral-800 pb-2 mb-2">
-                      <span class="text-xs font-semibold text-teal-400">
-                        {SHIELD_SNIPPET_OPTIONS.find((o) => o.key === selectedSnippetKey())?.label}
-                      </span>
-                      <span class="text-[11px] font-mono text-neutral-400">
-                        Zero-Downtime Edge Policy
-                      </span>
-                    </div>
-                    <pre class="text-xs font-mono text-neutral-200 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                      {shield().snippets[selectedSnippetKey()]}
+                    <pre class="p-4 rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] overflow-x-auto whitespace-pre">
+                      {shield().snippets[activeSnippet()]}
                     </pre>
                   </div>
                 </div>
-              </div>
+              </PrelineCard>
             )}
           </Show>
         </Show>
-      </div>
+
+        {/* Mode 4: Dedicated Verification Sandbox & Live Exploit Lab Tab */}
+        <Show when={activeTab() === "verification"}>
+          <PrelineCard
+            title="Verification Sandbox & Live Exploit Replay Lab"
+            subtitle="4-Stage Red-to-Green Deterministic Sandbox Execution Logs & Live Attack Replay"
+            headerRight={
+              <Show when={props.project.routeShield}>
+                {(shield) => (
+                  <div class="flex items-center gap-2">
+                    <PrelineBadge variant={shield().enabled ? "emerald" : "red"} dot>
+                      {shield().enabled ? "SHIELD ON" : "SHIELD OFF"}
+                    </PrelineBadge>
+                    <PrelineButton
+                      variant="secondary"
+                      size="sm"
+                      data-testid="toggle-shield-btn"
+                      onClick={() => props.onToggleShield(!shield().enabled)}
+                    >
+                      {shield().enabled ? "Disable Route Shield" : "Enable Route Shield"}
+                    </PrelineButton>
+                  </div>
+                )}
+              </Show>
+            }
+          >
+            <div class="space-y-6">
+              {/* Live Exploit Payload Tester */}
+              <Show when={props.project.routeShield}>
+                <div class="p-5 rounded-[16px] bg-[#F8F9FA] dark:bg-[#212329]/60 border border-[#EAECF0] dark:border-[#252830] space-y-4">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 class="text-[16px] leading-[24px] font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                        Live Exploit Payload Replay Tester
+                      </h4>
+                      <p class="text-[13px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF]">
+                        Dispatch a real exploit payload against the protected proxy endpoint to
+                        verify deterministic 403 blocking.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="flex flex-col sm:flex-row sm:items-end gap-3">
+                    <div class="flex-1">
+                      <PrelineInput
+                        label="Exploit Request Payload"
+                        value={props.attackPayload}
+                        onInput={(e) => props.setAttackPayload(e.currentTarget.value)}
+                        placeholder='{"url":"http://169.254.169.254/latest/meta-data/iam/"}'
+                        class="font-mono text-[13px]"
+                      />
+                    </div>
+                    <PrelineButton
+                      variant="primary"
+                      size="sm"
+                      data-testid="test-attack-btn"
+                      onClick={() => props.onTestAttack()}
+                    >
+                      Fire Live Exploit Payload
+                    </PrelineButton>
+                  </div>
+
+                  <Show when={props.attackResult}>
+                    {(res) => (
+                      <div
+                        data-testid="attack-verdict-banner"
+                        class={`p-4 rounded-[12px] border text-[13px] leading-[20px] font-mono ${
+                          res().verdict === "BLOCKED_GREEN"
+                            ? "bg-[#DCFCE7] border-[#15803D]/25 text-[#15803D] dark:bg-[#053C01] dark:border-[#B0F4B2]/25 dark:text-[#B0F4B2]"
+                            : "bg-[#FEE2E2] border-[#B91C1C]/25 text-[#B91C1C] dark:bg-[#7F1D1D] dark:border-[#FECACA]/25 dark:text-[#FECACA]"
+                        }`}
+                      >
+                        <div class="flex items-center justify-between font-bold mb-1">
+                          <span>
+                            Verdict: {res().verdict} (HTTP {res().httpStatus})
+                          </span>
+                          <span class="tabular-nums">{res().latencyMs} ms</span>
+                        </div>
+                        <div class="opacity-90 break-all">{res().responseBody}</div>
+                      </div>
+                    )}
+                  </Show>
+                </div>
+              </Show>
+
+              {/* 4-Stage Red-to-Green Sandbox Execution Logs */}
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <For each={timelineSteps()}>
+                  {(step, idx) => (
+                    <div class="p-4 rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] space-y-2">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="text-[13px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                          Stage {idx() + 1}: {step.title}
+                        </span>
+                        <PrelineBadge
+                          variant={
+                            step.status === "passed_green"
+                              ? "emerald"
+                              : step.status === "confirmed_red"
+                                ? "red"
+                                : "blue"
+                          }
+                        >
+                          {step.status.toUpperCase()} ({step.durationMs}ms)
+                        </PrelineBadge>
+                      </div>
+                      <p class="text-[13px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF]">
+                        {step.summary}
+                      </p>
+                      <pre class="p-3 rounded-[8px] bg-white dark:bg-[#17181C] border border-[#EAECF0] dark:border-[#252830] text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] overflow-x-auto whitespace-pre-wrap">
+                        {step.commandOrLog}
+                      </pre>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </div>
+          </PrelineCard>
+        </Show>
+      </Show>
     </div>
   );
 }

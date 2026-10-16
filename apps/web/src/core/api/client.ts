@@ -300,3 +300,26 @@ export async function polishAegisProject(
     },
   );
 }
+
+export async function resetAegisProjects(): Promise<{
+  reset: boolean;
+  projects: AegisProject[];
+  count: number;
+}> {
+  return apiRequest<{ reset: boolean; projects: AegisProject[]; count: number }>(
+    "/api/modules/aegis/reset",
+    {
+      method: "POST",
+      body: {},
+    },
+  );
+}
+
+export async function deleteAegisProject(projectId: string): Promise<{ deleted: string }> {
+  return apiRequest<{ deleted: string }>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}

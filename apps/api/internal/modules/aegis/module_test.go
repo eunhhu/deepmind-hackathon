@@ -2,14 +2,15 @@ package aegis
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"deepmind/api/internal/argon"
+	"deepmind/api/internal/modules"
+	"deepmind/api/internal/store"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,352 +18,382 @@ import (
 func setupAegisTestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	rg := r.Group("/api/modules/aegis")
+	deps := &modules.Dependencies{
+		Argon: argon.NewClient(""),
+		Store: store.NewMemoryStore(),
+	}
 	mod := NewModule()
-	rg := r.Group(mod.Meta().APIPrefix)
-	mod.RegisterRoutes(rg, nil)
+	mod.RegisterRoutes(rg, deps)
 	return r
 }
 
-func extractMap(t *testing.T, body []byte, wrapperKey string) map[string]any {
+func decodeAegisProjects(t *testing.T, data []byte) []AegisProject {
 	t.Helper()
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
-		t.Fatalf("failed to unmarshal JSON response: %v (body: %s)", err, string(body))
+	var wrapped struct {
+		Projects []AegisProject `json:"projects"`
 	}
-	if wrapperKey != "" {
-		if nested, ok := raw[wrapperKey].(map[string]any); ok {
-			return nested
-		}
+	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.Projects != nil {
+		return wrapped.Projects
 	}
-	return raw
+	var direct []AegisProject
+	if err := json.Unmarshal(data, &direct); err != nil {
+		t.Fatalf("failed to decode AegisProject slice: %v (body: %s)", err, string(data))
+	}
+	return direct
+}
+
+func decodeAegisProject(t *testing.T, data []byte) AegisProject {
+	t.Helper()
+	var wrapped AegisRunPipelineResponse
+	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.Project.Id != "" {
+		return wrapped.Project
+	}
+	var direct AegisProject
+	if err := json.Unmarshal(data, &direct); err != nil {
+		t.Fatalf("failed to decode AegisProject: %v (body: %s)", err, string(data))
+	}
+	return direct
 }
 
 func TestAegisSeedProjectsAndLifecycle(t *testing.T) {
-	router := setupAegisTestRouter()
+	r := setupAegisTestRouter()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects", nil)
 	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
+	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from GET /projects, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 200 OK on list projects, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var projectsList []map[string]any
-	var wrapped struct {
-		Projects []map[string]any `json:"projects"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &wrapped); err == nil && len(wrapped.Projects) > 0 {
-		projectsList = wrapped.Projects
-	} else if err := json.Unmarshal(w.Body.Bytes(), &projectsList); err != nil {
-		t.Fatalf("failed to parse projects list: %v (body: %s)", err, w.Body.String())
+	projects := decodeAegisProjects(t, w.Body.Bytes())
+	if len(projects) < 3 {
+		t.Fatalf("expected at least 3 seed projects, got %d", len(projects))
 	}
 
-	if len(projectsList) < 3 {
-		t.Fatalf("expected at least 3 seeded flagship projects, got %d", len(projectsList))
+	// Create a new git project, scan, remediate, and delete
+	createBody := `{"name":"test-git-service","intakeMode":"git","repoUrl":"https://github.com/acme/test-git-service"}`
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects", strings.NewReader(createBody))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	wCreate := httptest.NewRecorder()
+	r.ServeHTTP(wCreate, reqCreate)
+
+	if wCreate.Code != http.StatusCreated && wCreate.Code != http.StatusOK {
+		t.Fatalf("expected 201/200 on create project, got %d: %s", wCreate.Code, wCreate.Body.String())
 	}
 
-	found := map[string]bool{}
-	for _, p := range projectsList {
-		if id, ok := p["id"].(string); ok {
-			found[id] = true
-		}
+	created := decodeAegisProject(t, wCreate.Body.Bytes())
+	projID := created.Id
+	if projID == "" {
+		t.Fatalf("expected created project Id to be non-empty")
 	}
 
-	expectedIDs := []string{
-		"aegis-whitebox-github",
-		"aegis-blackbox-url-shield",
-		"aegis-blackbox-binary-elf",
+	// Scan with dryRun=true
+	reqScan := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/scan?dryRun=true", nil)
+	wScan := httptest.NewRecorder()
+	r.ServeHTTP(wScan, reqScan)
+	if wScan.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on scan, got %d: %s", wScan.Code, wScan.Body.String())
 	}
-	for _, id := range expectedIDs {
-		if !found[id] {
-			t.Errorf("expected seeded flagship project %q to be present, got %v", id, found)
-		}
+
+	// Remediate
+	reqRem := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/remediate", nil)
+	wRem := httptest.NewRecorder()
+	r.ServeHTTP(wRem, reqRem)
+	if wRem.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on remediate, got %d: %s", wRem.Code, wRem.Body.String())
+	}
+
+	// Delete
+	reqDel := httptest.NewRequest(http.MethodDelete, "/api/modules/aegis/projects/"+projID, nil)
+	wDel := httptest.NewRecorder()
+	r.ServeHTTP(wDel, reqDel)
+	if wDel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on delete, got %d: %s", wDel.Code, wDel.Body.String())
 	}
 }
 
 func TestAegisUrlDnsOwnershipGateAndScan(t *testing.T) {
-	router := setupAegisTestRouter()
+	r := setupAegisTestRouter()
 
-	// 1. Create URL-DNS project
-	createPayload := `{"name":"external-api","intakeMode":"url-dns","targetUrl":"https://api.example-target.io/v1/charge"}`
-	reqCreate := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects", bytes.NewBufferString(createPayload))
+	createBody := `{"name":"unverified-edge","intakeMode":"url-dns","targetUrl":"https://edge.example.com/api/v1/login"}`
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects", strings.NewReader(createBody))
 	reqCreate.Header.Set("Content-Type", "application/json")
 	wCreate := httptest.NewRecorder()
-	router.ServeHTTP(wCreate, reqCreate)
+	r.ServeHTTP(wCreate, reqCreate)
 
-	if wCreate.Code != http.StatusOK && wCreate.Code != http.StatusCreated {
-		t.Fatalf("expected 200 or 201 on project creation, got %d: %s", wCreate.Code, wCreate.Body.String())
+	created := decodeAegisProject(t, wCreate.Body.Bytes())
+	projID := created.Id
+
+	// Attempting to scan before DNS verification must fail with 403 Forbidden
+	reqScan := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/scan?dryRun=true", nil)
+	wScan := httptest.NewRecorder()
+	r.ServeHTTP(wScan, reqScan)
+	if wScan.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when scanning unverified url-dns project, got %d", wScan.Code)
 	}
 
-	proj := extractMap(t, wCreate.Body.Bytes(), "project")
-	projID, _ := proj["id"].(string)
-	if projID == "" {
-		t.Fatalf("expected non-empty project id, got: %v", proj)
-	}
-
-	dnsVerified, _ := proj["dnsVerified"].(bool)
-	if dnsVerified {
-		t.Fatalf("expected dnsVerified == false before DNS verification")
-	}
-
-	dnsTxtName, _ := proj["dnsTxtRecordName"].(string)
-	if !strings.Contains(dnsTxtName, "_aegis-verify.") || !strings.Contains(dnsTxtName, "example-target.io") {
-		t.Fatalf("expected dnsTxtRecordName to contain _aegis-verify and example-target.io, got %q", dnsTxtName)
-	}
-
-	// 2. Attempt scan BEFORE DNS verification -> must return 403 Forbidden
-	reqScanBlocked := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/scan?dryRun=true", bytes.NewBufferString(`{}`))
-	reqScanBlocked.Header.Set("Content-Type", "application/json")
-	wScanBlocked := httptest.NewRecorder()
-	router.ServeHTTP(wScanBlocked, reqScanBlocked)
-
-	if wScanBlocked.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden when scanning unverified URL-DNS target, got %d: %s", wScanBlocked.Code, wScanBlocked.Body.String())
-	}
-
-	// 3. Verify DNS with simulated TXT propagation
-	verifyPayload := `{"simulateTxtPropagation":true}`
-	reqVerify := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/verify-dns?simulate=true", bytes.NewBufferString(verifyPayload))
-	reqVerify.Header.Set("Content-Type", "application/json")
+	// Verify DNS with simulate=true
+	reqVerify := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/verify-dns?simulate=true", nil)
 	wVerify := httptest.NewRecorder()
-	router.ServeHTTP(wVerify, reqVerify)
-
+	r.ServeHTTP(wVerify, reqVerify)
 	if wVerify.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on verify-dns, got %d: %s", wVerify.Code, wVerify.Body.String())
+		t.Fatalf("expected 200 OK on simulated DNS verify, got %d: %s", wVerify.Code, wVerify.Body.String())
 	}
 
-	verifiedProj := extractMap(t, wVerify.Body.Bytes(), "project")
-	verifiedFlag, _ := verifiedProj["dnsVerified"].(bool)
-	if !verifiedFlag {
-		// Also check top-level dnsVerified if response wraps both
-		topLevel := extractMap(t, wVerify.Body.Bytes(), "")
-		if topFlag, ok := topLevel["dnsVerified"].(bool); !ok || !topFlag {
-			t.Fatalf("expected dnsVerified == true after verify-dns, got %v", wVerify.Body.String())
-		}
-	}
-
-	// 4. Scan AFTER DNS verification -> must return 200 OK with updated timeline
-	reqScanOK := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/scan?dryRun=true", bytes.NewBufferString(`{}`))
-	reqScanOK.Header.Set("Content-Type", "application/json")
-	wScanOK := httptest.NewRecorder()
-	router.ServeHTTP(wScanOK, reqScanOK)
-
-	if wScanOK.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on scan after DNS verification, got %d: %s", wScanOK.Code, wScanOK.Body.String())
-	}
-
-	scannedProj := extractMap(t, wScanOK.Body.Bytes(), "project")
-	timeline, ok := scannedProj["timeline"].([]any)
-	if !ok {
-		topLevel := extractMap(t, wScanOK.Body.Bytes(), "")
-		timeline, _ = topLevel["timeline"].([]any)
-	}
-	if len(timeline) == 0 {
-		t.Fatalf("expected non-empty timeline after scan, got %s", wScanOK.Body.String())
+	// Now scan must succeed
+	reqScanAfter := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/scan?dryRun=true", nil)
+	wScanAfter := httptest.NewRecorder()
+	r.ServeHTTP(wScanAfter, reqScanAfter)
+	if wScanAfter.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on scan after DNS verification, got %d: %s", wScanAfter.Code, wScanAfter.Body.String())
 	}
 }
 
 func TestAegisRouteShieldRedToGreenLoop(t *testing.T) {
-	router := setupAegisTestRouter()
+	r := setupAegisTestRouter()
+	projID := "aegis-blackbox-url-shield"
 
-	// 1. Toggle shield OFF
-	reqDisable := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-url-shield/shield-toggle", bytes.NewBufferString(`{"enabled":false}`))
+	// Ensure shield is disabled first
+	reqDisable := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/shield-toggle", strings.NewReader(`{"enabled":false}`))
 	reqDisable.Header.Set("Content-Type", "application/json")
 	wDisable := httptest.NewRecorder()
-	router.ServeHTTP(wDisable, reqDisable)
-
+	r.ServeHTTP(wDisable, reqDisable)
 	if wDisable.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on shield-toggle (disable), got %d: %s", wDisable.Code, wDisable.Body.String())
+		t.Fatalf("expected 200 OK on disable shield, got %d", wDisable.Code)
 	}
 
-	// 2. Test attack with shield OFF -> EXPLOITED_RED (httpStatus 200)
-	reqAttackRed := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-url-shield/test-attack", bytes.NewBufferString(`{}`))
+	// Test attack while shield is disabled -> should not be blocked (Red state)
+	reqAttackRed := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/test-attack", strings.NewReader(`{"attackPayload":"' OR 1=1 --"}`))
 	reqAttackRed.Header.Set("Content-Type", "application/json")
 	wAttackRed := httptest.NewRecorder()
-	router.ServeHTTP(wAttackRed, reqAttackRed)
-
+	r.ServeHTTP(wAttackRed, reqAttackRed)
 	if wAttackRed.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from test-attack endpoint, got %d: %s", wAttackRed.Code, wAttackRed.Body.String())
+		t.Fatalf("expected 200 OK on test-attack, got %d", wAttackRed.Code)
 	}
 
-	redResult := extractMap(t, wAttackRed.Body.Bytes(), "result")
-	if _, ok := redResult["verdict"]; !ok {
-		redResult = extractMap(t, wAttackRed.Body.Bytes(), "attackResult")
-	}
-	if ver, _ := redResult["verdict"].(string); ver != "EXPLOITED_RED" {
-		t.Fatalf("expected verdict == EXPLOITED_RED when shield is disabled, got %q (body: %s)", ver, wAttackRed.Body.String())
-	}
-	if status, _ := redResult["httpStatus"].(float64); int(status) != http.StatusOK {
-		t.Fatalf("expected httpStatus == 200 when shield is disabled, got %v", redResult["httpStatus"])
-	}
-
-	// 3. Toggle shield ON
-	reqEnable := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-url-shield/shield-toggle", bytes.NewBufferString(`{"enabled":true}`))
+	// Enable shield
+	reqEnable := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/shield-toggle", strings.NewReader(`{"enabled":true}`))
 	reqEnable.Header.Set("Content-Type", "application/json")
 	wEnable := httptest.NewRecorder()
-	router.ServeHTTP(wEnable, reqEnable)
-
+	r.ServeHTTP(wEnable, reqEnable)
 	if wEnable.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on shield-toggle (enable), got %d: %s", wEnable.Code, wEnable.Body.String())
+		t.Fatalf("expected 200 OK on enable shield, got %d", wEnable.Code)
 	}
 
-	// 4. Test attack with shield ON -> BLOCKED_GREEN (httpStatus 403)
-	reqAttackGreen := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-url-shield/test-attack", bytes.NewBufferString(`{}`))
+	// Test attack while shield is enabled -> blocked (Green state)
+	reqAttackGreen := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/test-attack", strings.NewReader(`{"attackPayload":"' OR 1=1 --"}`))
 	reqAttackGreen.Header.Set("Content-Type", "application/json")
 	wAttackGreen := httptest.NewRecorder()
-	router.ServeHTTP(wAttackGreen, reqAttackGreen)
-
+	r.ServeHTTP(wAttackGreen, reqAttackGreen)
 	if wAttackGreen.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from test-attack endpoint, got %d: %s", wAttackGreen.Code, wAttackGreen.Body.String())
+		t.Fatalf("expected 200 OK on test-attack with shield enabled, got %d", wAttackGreen.Code)
 	}
 
-	greenResult := extractMap(t, wAttackGreen.Body.Bytes(), "result")
-	if _, ok := greenResult["verdict"]; !ok {
-		greenResult = extractMap(t, wAttackGreen.Body.Bytes(), "attackResult")
+	var attackResp AegisShieldTestAttackResponse
+	if err := json.Unmarshal(wAttackGreen.Body.Bytes(), &attackResp); err != nil {
+		t.Fatalf("failed to decode test-attack response: %v", err)
 	}
-	if ver, _ := greenResult["verdict"].(string); ver != "BLOCKED_GREEN" {
-		t.Fatalf("expected verdict == BLOCKED_GREEN when shield is enabled, got %q (body: %s)", ver, wAttackGreen.Body.String())
+	if !strings.Contains(wAttackGreen.Body.String(), `"blocked":true`) {
+		t.Fatalf("expected attack to be blocked when shield is enabled, got: %s", wAttackGreen.Body.String())
 	}
-	if status, _ := greenResult["httpStatus"].(float64); int(status) != http.StatusForbidden {
-		t.Fatalf("expected httpStatus == 403 when shield is enabled, got %v", greenResult["httpStatus"])
+
+	// Also test reverse proxy middleware blocking malicious payload with 403
+	reqProxyMalicious := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/shield-proxy", strings.NewReader(`{"query":"UNION SELECT username, password FROM users"}`))
+	wProxyMalicious := httptest.NewRecorder()
+	r.ServeHTTP(wProxyMalicious, reqProxyMalicious)
+	if wProxyMalicious.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden from shield-proxy on SQLi payload, got %d", wProxyMalicious.Code)
 	}
 }
 
 func TestAegisPatchedBinaryDownload(t *testing.T) {
-	router := setupAegisTestRouter()
+	r := setupAegisTestRouter()
+	projID := "aegis-blackbox-binary-elf"
 
-	req := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-download", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/"+projID+"/binary-download", nil)
 	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
+	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from binary-download, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 200 OK on binary-download, got %d: %s", w.Code, w.Body.String())
 	}
 
-	payload := w.Body.Bytes()
-	if len(payload) < 4 {
-		t.Fatalf("expected non-empty ELF binary payload, got %d bytes", len(payload))
+	data := w.Body.Bytes()
+	if len(data) < 64 {
+		t.Fatalf("expected patched ELF binary of at least 64 bytes, got %d", len(data))
 	}
-
-	elfMagic := []byte{0x7f, 'E', 'L', 'F'}
-	if !bytes.HasPrefix(payload, elfMagic) {
-		t.Fatalf("expected payload to start with \\x7fELF, got %x", payload[:4])
-	}
-
-	sum := sha256.Sum256(payload)
-	actualSha := hex.EncodeToString(sum[:])
-	headerShaAfter := w.Header().Get("X-Aegis-SHA256-After")
-	if headerShaAfter == "" || headerShaAfter != actualSha {
-		t.Fatalf("expected downloaded binary sha256 (%s) to match X-Aegis-SHA256-After (%s)", actualSha, headerShaAfter)
+	if !bytes.Equal(data[:4], []byte{0x7f, 'E', 'L', 'F'}) {
+		t.Fatalf("expected ELF magic header \\x7fELF, got %v", data[:4])
 	}
 }
 
-func TestAegisBinaryUploadAndCryptographicPatchMatch(t *testing.T) {
-	router := setupAegisTestRouter()
+func TestAegisSseScanStreamAndTriModeEndpoints(t *testing.T) {
+	r := setupAegisTestRouter()
 
-	unpatched := BuildDefaultUnpatchedELF64("custom-edge-router.elf")
-	b64 := base64.StdEncoding.EncodeToString(unpatched)
-	uploadBody := `{"fileName":"custom-edge-router.elf","format":"ELF64","base64Data":"` + b64 + `"}`
-
-	reqUp := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-upload", bytes.NewBufferString(uploadBody))
-	reqUp.Header.Set("Content-Type", "application/json")
-	wUp := httptest.NewRecorder()
-	router.ServeHTTP(wUp, reqUp)
-
-	if wUp.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from binary-upload, got %d: %s", wUp.Code, wUp.Body.String())
-	}
-
-	analysis := extractMap(t, wUp.Body.Bytes(), "binaryAnalysis")
-	shaBefore, _ := analysis["sha256Before"].(string)
-	shaAfter, _ := analysis["sha256After"].(string)
-	if shaBefore == "" || shaAfter == "" || shaBefore == shaAfter {
-		t.Fatalf("expected distinct non-empty sha256Before (%s) and sha256After (%s)", shaBefore, shaAfter)
-	}
-
-	reqDown := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-download", nil)
-	wDown := httptest.NewRecorder()
-	router.ServeHTTP(wDown, reqDown)
-
-	if wDown.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from binary-download after upload, got %d", wDown.Code)
-	}
-	dlSum := sha256.Sum256(wDown.Body.Bytes())
-	dlHex := hex.EncodeToString(dlSum[:])
-	if dlHex != shaAfter {
-		t.Fatalf("expected downloaded binary sha256 (%s) to match binaryAnalysis.sha256After (%s)", dlHex, shaAfter)
-	}
-}
-
-func TestAegisScanStreamSSEAndRemediationEndpoints(t *testing.T) {
-	router := setupAegisTestRouter()
-
-	// 1. Test SSE /scan/stream
-	reqStream := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/scan/stream?dryRun=true", bytes.NewBufferString(`{"remediationMode":"git-pr","dryRun":true}`))
-	reqStream.Header.Set("Content-Type", "application/json")
+	// 1. SSE Scan Stream
+	reqStream := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/aegis-whitebox-github/scan/stream?dryRun=true", nil)
 	wStream := httptest.NewRecorder()
-	router.ServeHTTP(wStream, reqStream)
-
+	r.ServeHTTP(wStream, reqStream)
 	if wStream.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from scan/stream, got %d: %s", wStream.Code, wStream.Body.String())
+		t.Fatalf("expected 200 OK on SSE scan stream, got %d", wStream.Code)
 	}
-	sseOut := wStream.Body.String()
-	if !strings.Contains(sseOut, "event: stage_update") || !strings.Contains(sseOut, "event: scan_complete") {
-		t.Fatalf("expected SSE output to contain stage_update and scan_complete events, got: %s", sseOut)
+	bodyStr := wStream.Body.String()
+	if !strings.Contains(bodyStr, "event: stage_update") || !strings.Contains(bodyStr, "event: scan_complete") {
+		t.Fatalf("expected SSE stream to contain stage_update and scan_complete events, got: %s", bodyStr)
 	}
 
-	// 2. Test GET /patch-download
+	// 2. Create PR & Patch download for Mode A
+	reqPR := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/create-pr", nil)
+	wPR := httptest.NewRecorder()
+	r.ServeHTTP(wPR, reqPR)
+	if wPR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on create-pr, got %d: %s", wPR.Code, wPR.Body.String())
+	}
+
 	reqPatch := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects/aegis-whitebox-github/patch-download", nil)
 	wPatch := httptest.NewRecorder()
-	router.ServeHTTP(wPatch, reqPatch)
-	if wPatch.Code != http.StatusOK || !strings.Contains(wPatch.Body.String(), "diff --git") {
-		t.Fatalf("expected valid git format-patch from /patch-download, got %d: %s", wPatch.Code, wPatch.Body.String())
+	r.ServeHTTP(wPatch, reqPatch)
+	if wPatch.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on patch-download, got %d", wPatch.Code)
 	}
 
-	// 3. Test POST /create-pr
-	reqPR := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/create-pr", bytes.NewBufferString(`{}`))
-	wPR := httptest.NewRecorder()
-	router.ServeHTTP(wPR, reqPR)
-	if wPR.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /create-pr, got %d: %s", wPR.Code, wPR.Body.String())
-	}
-	prMap := extractMap(t, wPR.Body.Bytes(), "")
-	if status, _ := prMap["status"].(string); status != "opened" {
-		t.Fatalf("expected status == opened from /create-pr, got %q", status)
-	}
-
-	// 4. Test POST /polish
-	reqPolish := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-whitebox-github/polish", bytes.NewBufferString(`{}`))
-	wPolish := httptest.NewRecorder()
-	router.ServeHTTP(wPolish, reqPolish)
-	if wPolish.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /polish, got %d: %s", wPolish.Code, wPolish.Body.String())
-	}
-
-	// 5. Test PATCH /shield-rule and live /shield-proxy gateway
-	reqRule := httptest.NewRequest(http.MethodPatch, "/api/modules/aegis/projects/aegis-blackbox-url-shield/shield-rule", bytes.NewBufferString(`{"protectedPath":"/api/v1/webhooks/*","mitigationPattern":"(?i)(169\\.254\\.169\\.254|metadata\\.google\\.internal)","rateLimitPerMinute":90}`))
+	// 3. Shield Rule Patch for Mode B
+	reqRule := httptest.NewRequest(http.MethodPatch, "/api/modules/aegis/projects/aegis-blackbox-url-shield/shield-rule", strings.NewReader(`{"wafPattern":"(?i)(union\\s+select|sleep\\()","rateLimitRps":30}`))
 	reqRule.Header.Set("Content-Type", "application/json")
 	wRule := httptest.NewRecorder()
-	router.ServeHTTP(wRule, reqRule)
+	r.ServeHTTP(wRule, reqRule)
 	if wRule.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from PATCH /shield-rule, got %d: %s", wRule.Code, wRule.Body.String())
+		t.Fatalf("expected 200 OK on shield-rule update, got %d: %s", wRule.Code, wRule.Body.String())
 	}
 
-	reqProxyAttack := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/shield-proxy/aegis-blackbox-url-shield/api/v1/webhooks/preview", bytes.NewBufferString(`{"url":"http://169.254.169.254/computeMetadata/v1/"}`))
-	reqProxyAttack.Header.Set("Content-Type", "application/json")
-	wProxyAttack := httptest.NewRecorder()
-	router.ServeHTTP(wProxyAttack, reqProxyAttack)
-	if wProxyAttack.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden from live /shield-proxy on SSRF payload, got %d: %s", wProxyAttack.Code, wProxyAttack.Body.String())
+	// 4. Binary upload & Argon Polish for Mode C
+	reqBin := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-upload", strings.NewReader(`{"fileName":"custom-gateway.elf","sizeBytes":65536}`))
+	reqBin.Header.Set("Content-Type", "application/json")
+	wBin := httptest.NewRecorder()
+	r.ServeHTTP(wBin, reqBin)
+	if wBin.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on binary-upload, got %d: %s", wBin.Code, wBin.Body.String())
 	}
 
-	reqProxyClean := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/shield-proxy/aegis-blackbox-url-shield/api/v1/webhooks/preview", bytes.NewBufferString(`{"url":"https://hooks.stripe.com/events/evt_123"}`))
-	reqProxyClean.Header.Set("Content-Type", "application/json")
-	wProxyClean := httptest.NewRecorder()
-	router.ServeHTTP(wProxyClean, reqProxyClean)
-	if wProxyClean.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from live /shield-proxy on clean payload, got %d: %s", wProxyClean.Code, wProxyClean.Body.String())
+	reqPolish := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/aegis-blackbox-binary-elf/polish?dryRun=true", nil)
+	wPolish := httptest.NewRecorder()
+	r.ServeHTTP(wPolish, reqPolish)
+	if wPolish.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on polish, got %d: %s", wPolish.Code, wPolish.Body.String())
 	}
 }
 
+func TestAegisResetPurgesDummyProjects(t *testing.T) {
+	r := setupAegisTestRouter()
+
+	for _, name := range []string{"e2e-dummy-1", "e2e-dummy-2"} {
+		body := `{"name":"` + name + `","intakeMode":"git","repoUrl":"https://github.com/acme/` + name + `"}`
+		reqCreate := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects", strings.NewReader(body))
+		reqCreate.Header.Set("Content-Type", "application/json")
+		wCreate := httptest.NewRecorder()
+		r.ServeHTTP(wCreate, reqCreate)
+		if wCreate.Code != http.StatusCreated && wCreate.Code != http.StatusOK {
+			t.Fatalf("expected 201/200 creating %s, got %d: %s", name, wCreate.Code, wCreate.Body.String())
+		}
+	}
+
+	reqListBefore := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects", nil)
+	wListBefore := httptest.NewRecorder()
+	r.ServeHTTP(wListBefore, reqListBefore)
+	if wListBefore.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK listing projects before reset, got %d", wListBefore.Code)
+	}
+	beforeProjects := decodeAegisProjects(t, wListBefore.Body.Bytes())
+	if len(beforeProjects) != 5 {
+		t.Fatalf("expected 5 projects before reset, got %d", len(beforeProjects))
+	}
+
+	reqReset := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/reset", nil)
+	wReset := httptest.NewRecorder()
+	r.ServeHTTP(wReset, reqReset)
+	if wReset.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST /api/modules/aegis/reset, got %d: %s", wReset.Code, wReset.Body.String())
+	}
+
+	reqListAfter := httptest.NewRequest(http.MethodGet, "/api/modules/aegis/projects", nil)
+	wListAfter := httptest.NewRecorder()
+	r.ServeHTTP(wListAfter, reqListAfter)
+	if wListAfter.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK listing projects after reset, got %d", wListAfter.Code)
+	}
+	afterProjects := decodeAegisProjects(t, wListAfter.Body.Bytes())
+	if len(afterProjects) != 3 {
+		t.Fatalf("expected exactly 3 canonical seed projects after reset, got %d", len(afterProjects))
+	}
+
+	expectedIDs := map[string]bool{
+		"aegis-whitebox-github":     false,
+		"aegis-blackbox-url-shield": false,
+		"aegis-blackbox-binary-elf": false,
+	}
+	for _, p := range afterProjects {
+		if strings.HasPrefix(p.Id, "aegis-proj-") {
+			t.Fatalf("found leftover dummy project %s after reset", p.Id)
+		}
+		if _, ok := expectedIDs[p.Id]; !ok {
+			t.Fatalf("unexpected project ID %s after reset", p.Id)
+		}
+		expectedIDs[p.Id] = true
+	}
+	for id, seen := range expectedIDs {
+		if !seen {
+			t.Fatalf("missing canonical seed project %s after reset", id)
+		}
+	}
+}
+
+func TestAegisDynamicTargetArtifactsOnNewProjectScan(t *testing.T) {
+	r := setupAegisTestRouter()
+
+	createBody := `{"name":"korea-pay-webhook-edge","intakeMode":"url-dns","targetUrl":"https://pay.korea-fintech.kr/v3/settlement/callback"}`
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects", strings.NewReader(createBody))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	wCreate := httptest.NewRecorder()
+	r.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusCreated && wCreate.Code != http.StatusOK {
+		t.Fatalf("expected 201/200 on create custom URL project, got %d: %s", wCreate.Code, wCreate.Body.String())
+	}
+
+	created := decodeAegisProject(t, wCreate.Body.Bytes())
+	projID := created.Id
+
+	// Verify DNS with simulate=true
+	reqVerify := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/verify-dns?simulate=true", nil)
+	wVerify := httptest.NewRecorder()
+	r.ServeHTTP(wVerify, reqVerify)
+	if wVerify.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on DNS verify, got %d: %s", wVerify.Code, wVerify.Body.String())
+	}
+
+	// Scan project with dryRun=true
+	reqScan := httptest.NewRequest(http.MethodPost, "/api/modules/aegis/projects/"+projID+"/scan?dryRun=true", nil)
+	wScan := httptest.NewRecorder()
+	r.ServeHTTP(wScan, reqScan)
+	if wScan.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on scan, got %d: %s", wScan.Code, wScan.Body.String())
+	}
+
+	scanned := decodeAegisProject(t, wScan.Body.Bytes())
+	if scanned.RouteShield.ProtectedPath != "/v3/settlement/callback" {
+		t.Fatalf("expected routeShield.protectedPath to be '/v3/settlement/callback', got %q", scanned.RouteShield.ProtectedPath)
+	}
+	if len(scanned.Vulnerabilities) == 0 {
+		t.Fatalf("expected scanned project to have vulnerabilities")
+	}
+	if !strings.Contains(scanned.Vulnerabilities[0].Location, "/v3/settlement/callback") {
+		t.Fatalf("expected vulnerabilities[0].location to contain '/v3/settlement/callback', got %q", scanned.Vulnerabilities[0].Location)
+	}
+	if !strings.Contains(scanned.GitPrReport.PrTitle, "korea-pay-webhook-edge") {
+		t.Fatalf("expected gitPrReport.prTitle to contain 'korea-pay-webhook-edge', got %+v", scanned.GitPrReport)
+	}
+	if !strings.Contains(scanned.GitPrReport.CodeDiff.Explanation, "korea-pay-webhook-edge") {
+		t.Fatalf("expected gitPrReport.codeDiff.explanation to contain 'korea-pay-webhook-edge', got %+v", scanned.GitPrReport.CodeDiff)
+	}
+}

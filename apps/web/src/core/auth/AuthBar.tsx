@@ -1,254 +1,181 @@
-import type { AuthVerifyResponse } from "@deepmind/shared";
-import { createEffect, createSignal, Show } from "solid-js";
-import { fetchAuthMe } from "../api/client";
-import { getActiveFirebaseConfig, useAuth } from "./firebaseAuth";
+import { type Component, createSignal, onMount, Show } from "solid-js";
 
-export function AuthBar() {
-  const auth = useAuth();
-  const firebaseCfg = getActiveFirebaseConfig();
+export type AegisViewMode = "product" | "ops";
+export type AegisProductSection = "projects" | "vulnerabilities" | "remediation";
 
-  const [verifyInfo, setVerifyInfo] = createSignal<AuthVerifyResponse | null>(null);
-  const [verifying, setVerifying] = createSignal<boolean>(false);
-  const [showEmailPanel, setShowEmailPanel] = createSignal<boolean>(false);
-  const [emailInput, setEmailInput] = createSignal<string>("");
-  const [passwordInput, setPasswordInput] = createSignal<string>("");
+export const [aegisViewMode, setAegisViewMode] = createSignal<AegisViewMode>("product");
+export const [aegisProductSection, setAegisProductSection] =
+  createSignal<AegisProductSection>("projects");
 
-  const refreshBackendAuth = async () => {
-    setVerifying(true);
-    try {
-      const info = await fetchAuthMe();
-      setVerifyInfo(info);
-    } catch {
-      setVerifyInfo(null);
-    } finally {
-      setVerifying(false);
+const PRODUCT_NAV_ITEMS: ReadonlyArray<{
+  id: AegisProductSection;
+  label: string;
+  testId: string;
+}> = [
+  {
+    id: "projects",
+    label: "Targets & Overview",
+    testId: "product-nav-projects",
+  },
+  {
+    id: "vulnerabilities",
+    label: "Vulnerabilities & Reports",
+    testId: "product-nav-vulnerabilities",
+  },
+  {
+    id: "remediation",
+    label: "Remediation & Shields",
+    testId: "product-nav-remediation",
+  },
+];
+
+export const AuthBar: Component = () => {
+  const [isDark, setIsDark] = createSignal(false);
+
+  onMount(() => {
+    if (typeof document !== "undefined") {
+      setIsDark(document.documentElement.classList.contains("dark"));
     }
-  };
-
-  createEffect(() => {
-    // Re-verify against /api/auth/me whenever the active session changes
-    auth.session();
-    void refreshBackendAuth();
   });
 
-  const providerBadgeText = () => {
-    const current = auth.user();
-    if (!current) return "unauthenticated";
-    if (current.provider === "anonymous") return "firebase-anon";
-    return current.provider;
-  };
-
-  const isFirestore = () => verifyInfo()?.storeBackend === "firestore";
-
-  const storeBadgeText = () => {
-    const info = verifyInfo();
-    if (!info) {
-      return verifying() ? "Checking Store..." : "In-Memory Fast Store";
-    }
-    return info.storeBackend === "firestore"
-      ? "Firestore Native (asia-northeast3)"
-      : "In-Memory Fast Store";
-  };
-
-  const handleAnonSignIn = async () => {
-    try {
-      await auth.signInAnonymously();
-    } catch {
-      // Error surfaced via auth.error()
+  const toggleTheme = () => {
+    if (typeof document !== "undefined") {
+      const nextDark = document.documentElement.classList.toggle("dark");
+      setIsDark(nextDark);
     }
   };
 
-  const handleEmailSignIn = async () => {
-    if (!emailInput().trim() || !passwordInput()) return;
-    try {
-      await auth.signInWithEmail(emailInput(), passwordInput());
-      setShowEmailPanel(false);
-      setPasswordInput("");
-    } catch {
-      // Error surfaced via auth.error()
-    }
+  const handleBrandClick = () => {
+    setAegisViewMode("product");
+    setAegisProductSection("projects");
   };
 
-  const handleEmailSignUp = async () => {
-    if (!emailInput().trim() || !passwordInput()) return;
-    try {
-      await auth.signUpWithEmail(emailInput(), passwordInput());
-      setShowEmailPanel(false);
-      setPasswordInput("");
-    } catch {
-      // Error surfaced via auth.error()
-    }
-  };
-
-  const handleDemoSwitch = () => {
-    const suffix = Math.floor(100 + Math.random() * 900);
-    auth.signInDemo(`Hacker #${suffix}`);
+  const toggleOpsConsole = () => {
+    setAegisViewMode((prev) => (prev === "product" ? "ops" : "product"));
   };
 
   return (
-    <header class="sticky top-0 inset-x-0 z-40 w-full bg-white/95 backdrop-blur-md border-b border-gray-200 dark:bg-neutral-900/95 dark:border-neutral-800">
-      <div class="max-w-[85rem] w-full mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        {/* Left side: Brand logo, title, GCP project pill, Store Backend pill */}
-        <div class="flex flex-wrap items-center gap-2.5">
-          <div class="flex items-center gap-x-2.5">
-            <div class="size-8 rounded-lg bg-blue-600 text-white font-bold flex items-center justify-center shadow-2xs text-xs tracking-tighter">
-              A4
-            </div>
-            <span class="text-sm font-semibold text-gray-900 dark:text-white tracking-tight">
-              AEGIS-4 &bull; Gemini 4 Argon
+    <header class="relative z-40 bg-white dark:bg-[#17181C] border-b border-[#EAECF0] dark:border-[#252830]">
+      <div class="max-w-[1600px] mx-auto px-6 h-16 flex items-center justify-between gap-4">
+        {/* Brand Identity */}
+        <div class="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleBrandClick}
+            class="inline-flex items-center gap-3 text-left focus:outline-hidden rounded-[10px] cursor-pointer group"
+          >
+            <span class="w-9 h-9 rounded-[10px] bg-[#4F46E5] text-white inline-flex items-center justify-center shadow-2xs transition-transform group-hover:scale-[1.02]">
+              <svg
+                class="w-5 h-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <path d="m9 12 2 2 4-4" />
+              </svg>
             </span>
-          </div>
-
-          <span
-            class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-neutral-800 dark:text-neutral-200"
-            title="GCP Project & Identity Platform"
-          >
-            <span class="text-gray-500 dark:text-neutral-400">GCP:</span>
-            <strong class="font-semibold">{firebaseCfg.projectId}</strong>
-          </span>
-
-          <span
-            class={
-              isFirestore()
-                ? "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500"
-                : "inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400"
-            }
-          >
-            <span
-              class={
-                isFirestore()
-                  ? "size-1.5 inline-block rounded-full bg-teal-600 dark:bg-teal-400"
-                  : "size-1.5 inline-block rounded-full bg-blue-600 dark:bg-blue-400"
-              }
-            />
-            <span>{storeBadgeText()}</span>
-          </span>
+            <div class="flex items-center gap-2.5">
+              <span class="text-[16px] leading-[24px] font-bold tracking-tight text-[#111827] dark:text-[#F3F4F6]">
+                AEGIS-4
+              </span>
+              <span class="text-[13px] leading-[20px] font-semibold text-[#4B5563] dark:text-[#9CA3AF] px-2.5 py-0.5 rounded-full bg-[#F2F4F7] dark:bg-[#212329]">
+                Security Console
+              </span>
+            </div>
+          </button>
         </div>
 
-        {/* Right side: Current user badge + Preline auth action buttons */}
-        <div class="flex flex-wrap items-center gap-2">
-          <Show
-            when={auth.user()}
-            fallback={
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-                Not Signed In
-              </span>
-            }
+        {/* Product Navigation Filter Chips */}
+        <Show when={aegisViewMode() === "product"}>
+          <nav aria-label="Product sections" class="flex items-center gap-2">
+            {PRODUCT_NAV_ITEMS.map((item) => {
+              const isSelected = () => aegisProductSection() === item.id;
+              return (
+                <button
+                  type="button"
+                  data-testid={item.testId}
+                  aria-current={isSelected() ? "page" : undefined}
+                  onClick={() => setAegisProductSection(item.id)}
+                  class={`h-10 rounded-full px-4 inline-flex items-center gap-2 text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                    isSelected()
+                      ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-[#17181C] dark:text-[#818CF8] dark:border-[#818CF8]"
+                      : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C] dark:hover:bg-[#212329]"
+                  }`}
+                >
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </Show>
+
+        {/* Right Utility Controls */}
+        <div class="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label="Toggle color theme"
+            data-testid="theme-toggle-btn"
+            class="h-10 px-3 rounded-[12px] border border-[#DFE3E8] dark:border-[#2E323C] bg-white dark:bg-[#17181C] text-[#4B5563] dark:text-[#9CA3AF] hover:bg-[#F2F4F7] dark:hover:bg-[#212329] text-[13px] font-semibold inline-flex items-center gap-2 transition-colors cursor-pointer"
           >
-            {(currentUser) => (
-              <div class="inline-flex items-center gap-x-2 py-1 px-2.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 border border-gray-200 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-200">
-                <span class="inline-flex items-center py-0.5 px-1.5 rounded-md text-[11px] font-semibold bg-blue-100 text-blue-800 dark:bg-blue-800/40 dark:text-blue-300">
-                  {providerBadgeText()}
-                </span>
-                <strong class="font-semibold text-gray-900 dark:text-white">
-                  {currentUser().email || currentUser().displayName || currentUser().uid}
-                </strong>
-                <code class="text-[11px] text-gray-500 dark:text-neutral-400 font-mono">
-                  uid:{currentUser().uid.slice(0, 12)}
-                </code>
-              </div>
-            )}
-          </Show>
+            <span>{isDark() ? "☀️ Light" : "🌙 Dark"}</span>
+          </button>
+
+          <div
+            data-testid="operator-session-pill"
+            class="h-10 px-3.5 rounded-full bg-[#F2F4F7] dark:bg-[#212329] text-[13px] font-semibold text-[#111827] dark:text-[#F3F4F6] inline-flex items-center gap-2"
+          >
+            <span class="w-2 h-2 rounded-full bg-[#059669] dark:bg-[#34D399]" />
+            <span>SecOps Operator</span>
+          </div>
 
           <button
             type="button"
-            class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-            disabled={auth.loading()}
-            onClick={handleAnonSignIn}
+            data-testid="toggle-ops-console-btn"
+            onClick={toggleOpsConsole}
+            class={`h-10 px-4 rounded-[12px] text-[14px] leading-[20px] font-semibold border transition-colors cursor-pointer inline-flex items-center gap-2 ${
+              aegisViewMode() === "ops"
+                ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                : "bg-white dark:bg-[#17181C] text-[#111827] dark:text-[#F3F4F6] border-[#DFE3E8] dark:border-[#2E323C] hover:bg-[#F2F4F7] dark:hover:bg-[#212329]"
+            }`}
           >
-            ⚡ 1-Click Firebase Anon
+            <span>
+              {aegisViewMode() === "ops" ? "← Back to Product Console" : "⚙️ Ops & Engine Console"}
+            </span>
           </button>
-
-          <button
-            type="button"
-            class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer transition-colors"
-            onClick={() => setShowEmailPanel((prev) => !prev)}
-          >
-            🔐 Email Auth
-          </button>
-
-          <button
-            type="button"
-            class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-            disabled={auth.loading()}
-            onClick={handleDemoSwitch}
-          >
-            🧪 Demo
-          </button>
-
-          <Show when={auth.user()}>
-            <button
-              type="button"
-              class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-700 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800 cursor-pointer transition-colors"
-              onClick={() => auth.signOut()}
-            >
-              Sign Out
-            </button>
-          </Show>
         </div>
       </div>
 
-      {/* Inline Email / Password Preline Popover Bar */}
-      <Show when={showEmailPanel()}>
-        <div class="border-t border-gray-200 bg-gray-50/90 dark:bg-neutral-900 dark:border-neutral-800">
-          <div class="max-w-[85rem] w-full mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-wrap items-end gap-3">
-            <label class="flex-1 min-w-[200px] block">
-              <span class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1">
-                Email Address
+      {/* Ops Infrastructure Strip — strictly hidden from DOM in Product mode */}
+      <Show when={aegisViewMode() === "ops"}>
+        <div
+          data-testid="ops-infrastructure-strip"
+          class="bg-[#F2F4F7] dark:bg-[#212329] border-t border-[#EAECF0] dark:border-[#252830] px-6 py-2"
+        >
+          <div class="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-3 text-[12px] leading-[18px] font-medium text-[#4B5563] dark:text-[#9CA3AF]">
+            <div class="flex items-center gap-3">
+              <span class="inline-flex items-center gap-1.5 font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                <span class="w-2 h-2 rounded-full bg-[#4F46E5] dark:bg-[#818CF8]" />
+                Engine Telemetry Active
               </span>
-              <input
-                type="email"
-                class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
-                placeholder="hacker@deepmind.dev"
-                value={emailInput()}
-                onInput={(e) => setEmailInput(e.currentTarget.value)}
-              />
-            </label>
-
-            <label class="flex-1 min-w-[200px] block">
-              <span class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1">
-                Password
-              </span>
-              <input
-                type="password"
-                class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
-                placeholder="Min 6 characters"
-                value={passwordInput()}
-                onInput={(e) => setPasswordInput(e.currentTarget.value)}
-              />
-            </label>
-
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                disabled={auth.loading() || !emailInput().trim() || passwordInput().length < 6}
-                onClick={handleEmailSignIn}
-              >
-                Sign In
-              </button>
-              <button
-                type="button"
-                class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
-                disabled={auth.loading() || !emailInput().trim() || passwordInput().length < 6}
-                onClick={handleEmailSignUp}
-              >
-                Sign Up
-              </button>
+              <span>•</span>
+              <span class="font-mono">Runtime: Gemini 4 Argon Swarm</span>
+              <span>•</span>
+              <span class="font-mono">Verification Loop: Z3 + Container Sandbox</span>
+            </div>
+            <div class="flex items-center gap-3 font-mono">
+              <span>PostgreSQL + Redis Queue: Connected</span>
             </div>
           </div>
         </div>
       </Show>
-
-      <Show when={auth.error()}>
-        {(err) => (
-          <div class="border-t border-red-200 bg-red-50 dark:bg-red-950/40 dark:border-red-900/60">
-            <div class="max-w-[85rem] w-full mx-auto px-4 sm:px-6 lg:px-8 py-2 text-xs font-medium text-red-800 dark:text-red-300">
-              {err()}
-            </div>
-          </div>
-        )}
-      </Show>
     </header>
   );
-}
+};
+
+export default AuthBar;

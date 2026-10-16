@@ -500,7 +500,9 @@ export interface AegisUpdateShieldRuleRequest {
   protectedPath?: string;
   methods?: string[];
   mitigationPattern?: string;
+  blockPatternRegex?: string;
   rateLimitPerMinute?: number;
+  rateLimitRps?: number;
 }
 
 export interface AegisCreatePrResponse {

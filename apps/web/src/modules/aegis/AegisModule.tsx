@@ -1,1285 +1,996 @@
 import type {
   AegisIntakeMode,
-  AegisPipelineStep,
   AegisProject,
   AegisRemediationMode,
-  AegisRunPipelineResponse,
   AegisShieldTestAttackResponse,
+  AegisTimelineStep,
   AegisVerifyDnsResponse,
-  CreateAegisProjectRequest,
 } from "@deepmind/shared";
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
-import { buildAuthHeaders } from "../../core/api/client";
+import {
+  buildAuthHeaders,
+  resetAegisProjects,
+  streamAegisPipeline,
+  uploadAegisBinary,
+} from "../../core/api/client";
+import { aegisProductSection, setAegisProductSection } from "../../core/auth/AuthBar";
+import {
+  PrelineAlert,
+  PrelineBadge,
+  PrelineButton,
+  PrelineCard,
+  PrelineInput,
+} from "../../core/ui/preline";
 import { AegisPatchInsightPanel } from "./AegisPatchInsightPanel";
 
-interface AegisScanStreamEvent {
-  type: "stage_update" | "scan_complete" | "error";
-  stageIndex?: number;
-  step?: AegisPipelineStep;
-  project?: AegisProject;
-  interactionIds?: string[];
-  totalDurationMs?: number;
-  message?: string;
-}
-
-const DEFAULT_REMEDIATION_BY_MODE: Record<AegisIntakeMode, AegisRemediationMode> = {
-  github: "git-pr",
-  "url-dns": "route-shield",
-  binary: "binary-patch",
-};
-
-function hexPreviewToBase64(hex: string): string {
-  const cleanTokens = hex
-    .trim()
-    .split(/\s+/)
-    .filter((token) => /^[0-9a-fA-F]{2}$/.test(token));
-  if (cleanTokens.length === 0) return "";
-  let binaryStr = "";
-  for (const token of cleanTokens) {
-    binaryStr += String.fromCharCode(Number.parseInt(token, 16));
+async function aegisFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      ...buildAuthHeaders(),
+      ...(options.headers as Record<string, string> | undefined),
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`AEGIS API error (${res.status}): ${text}`);
   }
-  return typeof btoa === "function" ? btoa(binaryStr) : "";
+  return (await res.json()) as T;
 }
 
-export function AegisModule() {
+export function AegisModule(props: { viewMode?: "product" | "ops" } = {}) {
+  const isOpsMode = () => props.viewMode === "ops";
   const [projects, setProjects] = createSignal<AegisProject[]>([]);
-  const [selectedId, setSelectedId] = createSignal<string>("aegis-whitebox-github");
-  const [backendMode, setBackendMode] = createSignal<string>("hybrid-sandbox");
-  const [loading, setLoading] = createSignal<boolean>(false);
-  const [runningPipeline, setRunningPipeline] = createSignal<boolean>(false);
-  const [verifyingDns, setVerifyingDns] = createSignal<boolean>(false);
-  const [uploadingBinary, setUploadingBinary] = createSignal<boolean>(false);
-  const [statusBanner, setStatusBanner] = createSignal<string | null>(null);
-  const [errorBanner, setErrorBanner] = createSignal<string | null>(null);
-  const [showIntakeForm, setShowIntakeForm] = createSignal<boolean>(false);
-  const [lastPipelineSummary, setLastPipelineSummary] = createSignal<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = createSignal<string>("");
+  const [loading, setLoading] = createSignal(false);
+  const [scanning, setScanning] = createSignal(false);
+  const [verifyingDns, setVerifyingDns] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
 
-  // New Target Intake State
-  const [intakeName, setIntakeName] = createSignal<string>("Payments Edge API Gateway");
-  const [intakeMode, setIntakeMode] = createSignal<AegisIntakeMode>("url-dns");
-  const [intakeGithubUrl, setIntakeGithubUrl] = createSignal<string>(
-    "https://github.com/acme-sec/payments-gateway",
+  // New Project Onboarding Modal State
+  const [showNewForm, setShowNewForm] = createSignal(false);
+  const [newName, setNewName] = createSignal("");
+  const [newMode, setNewMode] = createSignal<AegisIntakeMode>("url-dns");
+  const [newRepoUrl, setNewRepoUrl] = createSignal("https://github.com/acme-corp/checkout-api");
+  const [newTargetUrl, setNewTargetUrl] = createSignal(
+    "https://pay.staging.acme-cloud.io/api/v1/webhooks/preview",
   );
-  const [intakeCdWorkflow, setIntakeCdWorkflow] = createSignal<string>(
-    "name: Production Deploy\non: [push]\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gcloud run deploy payments-gateway --source .",
-  );
-  const [intakeTargetUrl, setIntakeTargetUrl] = createSignal<string>(
-    "https://edge-api.acme-pay.internal",
-  );
-  const [intakeBinaryName, setIntakeBinaryName] = createSignal<string>("iot-gateway-daemon.elf");
-  const [intakeBinarySize, setIntakeBinarySize] = createSignal<number>(148_920);
-  const [intakeBinaryHexPreview, setIntakeBinaryHexPreview] = createSignal<string>(
-    "7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 02 00 3e 00 01 00 00 00",
-  );
-  const [binaryBase64Data, setBinaryBase64Data] = createSignal<string>("");
+  const [newBinaryName, setNewBinaryName] = createSignal("edge-telemetry-gateway.elf");
 
-  const selectedProject = createMemo<AegisProject | undefined>(() => {
-    const list = projects();
-    return list.find((p) => p.id === selectedId()) ?? list[0];
-  });
+  // Live Exploit Payload Tester State
+  const [attackPayload, setAttackPayload] = createSignal(
+    '{"previewUrl":"http://169.254.169.254/latest/meta-data/iam/security-credentials/prod-admin-role"}',
+  );
+  const [attackResult, setAttackResult] = createSignal<AegisShieldTestAttackResponse | null>(null);
 
-  const kpiStats = createMemo(() => {
-    const list = projects();
-    let confirmedRed = 0;
-    let verifiedGreen = 0;
-    let shieldBlocks = 0;
-    for (const proj of list) {
-      for (const v of proj.vulnerabilities) {
-        if (v.zeroFalsePositiveConfirmed) confirmedRed += 1;
-        if (v.verifyGreenLog.trim().length > 0) verifiedGreen += 1;
-      }
-      if (proj.routeShield) {
-        shieldBlocks += proj.routeShield.blockedRequestsCount;
-      }
-    }
-    return {
-      totalTargets: list.length,
-      confirmedRed,
-      verifiedGreen,
-      shieldBlocks,
-    };
-  });
+  // Live SSE Timeline Stream State
+  const [liveSteps, setLiveSteps] = createSignal<AegisTimelineStep[]>([]);
+  const [uploadingBinary, setUploadingBinary] = createSignal(false);
 
-  async function fetchProjects(preserveSelection = true) {
+  // Selected Finding Accordion State (progressive disclosure)
+  const [expandedFindingId, setExpandedFindingId] = createSignal<string | null>(null);
+
+  const selectedProject = createMemo(() => projects().find((p) => p.id === selectedProjectId()));
+
+  async function loadProjects() {
     setLoading(true);
-    setErrorBanner(null);
+    setError(null);
     try {
-      const res = await fetch("/api/modules/aegis/projects", {
-        headers: buildAuthHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error(`Failed to load AEGIS-4 projects (HTTP ${res.status})`);
-      }
-      const data = (await res.json()) as { projects: AegisProject[]; backend: string };
-      setProjects(data.projects ?? []);
-      setBackendMode(data.backend ?? "hybrid-sandbox");
-      if (!preserveSelection && data.projects.length > 0) {
-        setSelectedId(data.projects[0].id);
-      } else if (data.projects.length > 0 && !data.projects.some((p) => p.id === selectedId())) {
-        setSelectedId(data.projects[0].id);
+      const res = await aegisFetch<{
+        backendMode: string;
+        projects: AegisProject[];
+      }>("/api/modules/aegis/projects");
+      setProjects(res.projects ?? []);
+      if (!selectedProjectId() && res.projects && res.projects.length > 0) {
+        setSelectedProjectId(res.projects[0].id);
       }
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "Failed to load AEGIS projects");
+      setError(err instanceof Error ? err.message : "Failed to load AEGIS-4 projects");
     } finally {
       setLoading(false);
     }
   }
 
   onMount(() => {
-    void fetchProjects(true);
+    void loadProjects();
   });
 
   function updateProjectInList(updated: AegisProject) {
-    setProjects((prev) => {
-      const exists = prev.some((p) => p.id === updated.id);
-      if (!exists) return [updated, ...prev];
-      return prev.map((p) => (p.id === updated.id ? updated : p));
-    });
-    setSelectedId(updated.id);
+    setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    setSelectedProjectId(updated.id);
   }
 
-  function updateProjectTimelineStep(
-    projectId: string,
-    stageIndex: number,
-    step: AegisPipelineStep,
-  ) {
-    setProjects((prev) =>
-      prev.map((proj) => {
-        if (proj.id !== projectId) return proj;
-        const nextTimeline = proj.timeline.map((existing, idx) => {
-          if (idx === stageIndex) return step;
-          if (idx === stageIndex + 1 && existing.status === "pending") {
-            return { ...existing, status: "running" as const };
-          }
-          return existing;
-        });
-        return {
-          ...proj,
-          timeline: nextTimeline,
-        };
-      }),
-    );
-  }
-
-  async function handleVerifyDns(project: AegisProject) {
-    setVerifyingDns(true);
-    setErrorBanner(null);
-    setStatusBanner(null);
+  async function handleResetDemoProjects() {
+    setLoading(true);
+    setError(null);
+    setNotice(null);
     try {
-      const res = await fetch(
-        `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/verify-dns?simulate=true`,
+      const res = await resetAegisProjects();
+      setProjects(res.projects ?? []);
+      if (res.projects && res.projects.length > 0) {
+        setSelectedProjectId(res.projects[0].id);
+      }
+      setNotice("Demo targets restored to clean baseline (3 flagship targets).");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset demo projects");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCreateProject(e: Event) {
+    e.preventDefault();
+    if (!newName().trim()) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await aegisFetch<{ project: AegisProject }>("/api/modules/aegis/projects", {
+        method: "POST",
+        body: JSON.stringify({
+          name: newName().trim(),
+          intakeMode: newMode(),
+          repoUrl: newMode() === "github" ? newRepoUrl().trim() : undefined,
+          targetUrl: newMode() === "url-dns" ? newTargetUrl().trim() : undefined,
+          binaryFileName: newMode() === "binary" ? newBinaryName().trim() : undefined,
+        }),
+      });
+      setProjects((prev) => [res.project, ...prev]);
+      setSelectedProjectId(res.project.id);
+      setAegisProductSection("projects");
+      setNewName("");
+      setShowNewForm(false);
+      setNotice(
+        res.project.intakeMode === "url-dns"
+          ? `Created URL target "${res.project.name}". Verify DNS TXT record (${res.project.dnsTxtRecordName}) before active fuzzing.`
+          : `Created security target "${res.project.name}". Ready for Red-to-Green verification.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create target project");
+    }
+  }
+
+  async function handleVerifyDns(projectId: string) {
+    setVerifyingDns(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await aegisFetch<AegisVerifyDnsResponse>(
+        `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/verify-dns`,
         {
           method: "POST",
-          headers: buildAuthHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
-            projectId: project.id,
+            projectId,
             simulateTxtPropagation: true,
           }),
         },
       );
-      if (!res.ok) {
-        throw new Error(`DNS TXT verification failed (HTTP ${res.status})`);
-      }
-      const data = (await res.json()) as AegisVerifyDnsResponse;
-      updateProjectInList(data.project);
-      setStatusBanner(
-        `DNS TXT Ownership Verified via ${data.resolverUsed}: ${data.txtRecordName} -> "${data.expectedToken}". ${data.message}`,
-      );
+      updateProjectInList(res.project);
+      setNotice(res.message);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "DNS TXT check failed");
+      setError(err instanceof Error ? err.message : "DNS TXT verification failed");
     } finally {
       setVerifyingDns(false);
     }
   }
 
-  async function handleRunScan(project: AegisProject, overrideMode?: AegisRemediationMode) {
-    setRunningPipeline(true);
-    setErrorBanner(null);
-    setStatusBanner(null);
-    const remediationMode =
-      overrideMode ?? project.remediationMode ?? DEFAULT_REMEDIATION_BY_MODE[project.intakeMode];
-
-    // Optimistically set stage 0 to "running" and stages 1..3 to "pending" for live progression
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== project.id) return p;
-        return {
-          ...p,
-          timeline: p.timeline.map((step, idx) => ({
-            ...step,
-            status: idx === 0 ? ("running" as const) : ("pending" as const),
-          })),
-        };
-      }),
-    );
-
+  async function handleRunScan(projectId: string, remediationMode?: AegisRemediationMode) {
+    setScanning(true);
+    setError(null);
+    setNotice(null);
     try {
-      const streamRes = await fetch(
-        `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/scan/stream`,
-        {
-          method: "POST",
-          headers: buildAuthHeaders({
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          }),
-          body: JSON.stringify({
-            projectId: project.id,
-            remediationMode,
-            dryRun: true,
-          }),
-        },
+      const res = await aegisFetch<{
+        project: AegisProject;
+        interactionIds: string[];
+        totalDurationMs: number;
+      }>(`/api/modules/aegis/projects/${encodeURIComponent(projectId)}/scan`, {
+        method: "POST",
+        body: JSON.stringify({
+          projectId,
+          remediationMode,
+          dryRun: false,
+        }),
+      });
+      updateProjectInList(res.project);
+      setNotice(
+        `Completed deterministic security scan for ${res.project.name} in ${res.totalDurationMs} ms.`,
       );
-
-      if (streamRes.ok && streamRes.body) {
-        const reader = streamRes.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let completedProject: AegisProject | null = null;
-        let streamedInteractions: string[] = [];
-        let streamedDurationMs = 0;
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line.startsWith("data:")) continue;
-            const jsonStr = line.slice(5).trim();
-            if (!jsonStr || jsonStr === "[DONE]") continue;
-            try {
-              const event = JSON.parse(jsonStr) as AegisScanStreamEvent;
-              if (
-                event.type === "stage_update" &&
-                event.step !== undefined &&
-                typeof event.stageIndex === "number"
-              ) {
-                updateProjectTimelineStep(project.id, event.stageIndex, event.step);
-                await new Promise((resolve) => setTimeout(resolve, 140));
-              } else if (event.type === "scan_complete" && event.project) {
-                completedProject = event.project;
-                streamedInteractions = event.interactionIds ?? [];
-                streamedDurationMs = event.totalDurationMs ?? 0;
-                updateProjectInList(event.project);
-              } else if (event.type === "error" && event.message) {
-                throw new Error(event.message);
-              }
-            } catch (parseErr) {
-              if (parseErr instanceof Error && !(parseErr instanceof SyntaxError)) {
-                throw parseErr;
-              }
-            }
-          }
-        }
-
-        if (completedProject) {
-          const totalDuration =
-            streamedDurationMs ||
-            completedProject.timeline.reduce((acc, s) => acc + s.durationMs, 0);
-          const interactionInfo =
-            streamedInteractions.length > 0
-              ? `${streamedInteractions.length} Gemini interactions (${streamedInteractions.join(", ")})`
-              : "4 Gemini stage interactions";
-          const summaryText = `4-Stage Loop Verified in ${totalDuration}ms (${interactionInfo})`;
-          setLastPipelineSummary(summaryText);
-          setStatusBanner(
-            `4-Stage Self-Healing Stream Completed (${remediationMode}): ${summaryText}`,
-          );
-          return;
-        }
-      }
-
-      // Fallback to standard JSON /scan endpoint if /scan/stream is unavailable
-      const res = await fetch(
-        `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/scan?dryRun=true`,
-        {
-          method: "POST",
-          headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            projectId: project.id,
-            remediationMode,
-            dryRun: true,
-          }),
-        },
-      );
-      if (!res.ok) {
-        throw new Error(`Self-healing loop request failed (HTTP ${res.status})`);
-      }
-      const data = (await res.json()) as AegisRunPipelineResponse;
-      for (let idx = 0; idx < data.project.timeline.length; idx += 1) {
-        updateProjectTimelineStep(project.id, idx, data.project.timeline[idx]);
-        await new Promise((resolve) => setTimeout(resolve, 140));
-      }
-      updateProjectInList(data.project);
-      const summaryText = `4-Stage Loop Verified in ${data.totalDurationMs}ms (${data.interactionIds.length} Gemini interactions: ${data.interactionIds.join(", ")})`;
-      setLastPipelineSummary(summaryText);
-      setStatusBanner(`4-Stage Self-Healing Loop Completed (${remediationMode}): ${summaryText}`);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "Failed to run self-healing pipeline");
+      setError(err instanceof Error ? err.message : "Security scan failed");
     } finally {
-      setRunningPipeline(false);
+      setScanning(false);
     }
   }
 
-  async function handleToggleShield(project: AegisProject, enabled: boolean) {
-    setErrorBanner(null);
+  async function handleStreamScan(projectId: string, remediationMode?: AegisRemediationMode) {
+    setScanning(true);
+    setError(null);
+    setNotice(null);
+    setLiveSteps([]);
     try {
-      const res = await fetch(
-        `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/shield-toggle`,
-        {
-          method: "POST",
-          headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ enabled }),
-        },
-      );
-      if (!res.ok) {
-        throw new Error(`Failed to toggle Route Shield (HTTP ${res.status})`);
-      }
-      const data = (await res.json()) as { project: AegisProject };
-      updateProjectInList(data.project);
-      setStatusBanner(
-        `Autonomous Edge Route Shield ${enabled ? "ENABLED (HTTP 403 Active Protection)" : "DISABLED (Pass-Through)"} for ${project.name}.`,
-      );
+      await streamAegisPipeline(projectId, remediationMode, false, (evt) => {
+        if (evt.step) {
+          const step = evt.step;
+          setLiveSteps((prev) => [...prev, step]);
+        }
+        if (evt.type === "scan_complete" && evt.project) {
+          updateProjectInList(evt.project);
+          setLiveSteps([]);
+          setNotice(
+            `4-stage Red-to-Green autonomous verification completed in ${evt.totalDurationMs ?? 0} ms.`,
+          );
+        }
+      });
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "Failed to toggle shield");
+      setError(err instanceof Error ? err.message : "Live SSE scan stream failed");
+    } finally {
+      setScanning(false);
     }
   }
 
-  async function handleTestAttack(
-    project: AegisProject,
-    attackPayload: string,
-  ): Promise<AegisShieldTestAttackResponse | null> {
-    setErrorBanner(null);
-    try {
-      const res = await fetch(
-        `/api/modules/aegis/projects/${encodeURIComponent(project.id)}/test-attack`,
-        {
-          method: "POST",
-          headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            projectId: project.id,
-            attackPayload,
-          }),
-        },
-      );
-      if (!res.ok) {
-        throw new Error(`Test attack simulation failed (HTTP ${res.status})`);
-      }
-      const data = (await res.json()) as AegisShieldTestAttackResponse;
-      updateProjectInList(data.project);
-      setStatusBanner(
-        `Live Exploit Replay against ${project.name}: HTTP ${data.httpStatus} (${data.verdict}) in ${data.latencyMs}ms.`,
-      );
-      return data;
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "Attack test failed");
-      return null;
-    }
-  }
-
-  async function uploadBinaryBytesToProject(
-    projectId: string,
-    fileName: string,
-    base64Data: string,
-  ): Promise<AegisProject | null> {
-    if (!base64Data) return null;
+  async function handleBinaryFileSelect(projectId: string, file: File) {
     setUploadingBinary(true);
+    setError(null);
     try {
-      const res = await fetch(
-        `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/binary-upload`,
-        {
-          method: "POST",
-          headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            fileName,
-            base64Data,
-          }),
-        },
-      );
-      if (!res.ok) return null;
-      const raw = (await res.json()) as { project?: AegisProject } & AegisProject;
-      const updated = raw.project ?? raw;
-      if (updated?.id) {
-        updateProjectInList(updated);
-        return updated;
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf.slice(0, 65536));
+      let binaryStr = "";
+      for (const b of bytes) {
+        binaryStr += String.fromCharCode(b);
       }
-      return null;
-    } catch {
-      return null;
+      const base64Data = btoa(binaryStr);
+      const updated = await uploadAegisBinary(projectId, {
+        fileName: file.name,
+        base64Data,
+      });
+      updateProjectInList(updated);
+      setNotice(
+        `Uploaded binary "${file.name}" (${file.size} bytes) & generated byte-level hot-patch.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Binary upload failed");
     } finally {
       setUploadingBinary(false);
     }
   }
 
-  async function handleBinaryFileChange(e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    setIntakeBinaryName(file.name);
-    setIntakeBinarySize(file.size);
-
-    // Read full binary as base64 via FileReader for Go debug/elf, debug/pe, debug/macho & SHA-256 inspection
-    await new Promise<void>((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = typeof reader.result === "string" ? reader.result : "";
-        const base64 = result.includes(",") ? (result.split(",")[1] ?? "") : result;
-        setBinaryBase64Data(base64);
-        resolve();
-      };
-      reader.onerror = () => resolve();
-      reader.readAsDataURL(file);
-    });
-
+  async function handleToggleShield(projectId: string, enabled: boolean) {
+    setError(null);
     try {
-      const slice = file.slice(0, 32);
-      const buffer = await slice.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      const hex = Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join(" ");
-      setIntakeBinaryHexPreview(hex || "7f 45 4c 46 02 01 01 00");
-    } catch {
-      // Keep default hex preview on error
-    }
-
-    const active = selectedProject();
-    if (!showIntakeForm() && active && active.intakeMode === "binary" && binaryBase64Data()) {
-      const updated = await uploadBinaryBytesToProject(active.id, file.name, binaryBase64Data());
-      if (updated) {
-        setStatusBanner(
-          `Uploaded binary "${file.name}" (${file.size.toLocaleString()} bytes) to "${updated.name}" — Go binary parser verified ${updated.binaryAnalysis?.format ?? "ELF/PE/Mach-O"} header & SHA-256.`,
-        );
+      const res = await aegisFetch<{ project: AegisProject }>(
+        `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/shield-toggle`,
+        {
+          method: "POST",
+          body: JSON.stringify({ enabled }),
+        },
+      );
+      updateProjectInList(res.project);
+      if (enabled) {
+        setAttackResult(null);
       }
-    }
-  }
-
-  function applyBinaryPreset(name: string, size: number, hex: string) {
-    setIntakeBinaryName(name);
-    setIntakeBinarySize(size);
-    setIntakeBinaryHexPreview(hex);
-    setBinaryBase64Data(hexPreviewToBase64(hex));
-  }
-
-  async function handleCreateProject(e: SubmitEvent) {
-    e.preventDefault();
-    setErrorBanner(null);
-    const mode = intakeMode();
-    const payload: CreateAegisProjectRequest = {
-      name: intakeName().trim() || "Untitled Security Target",
-      intakeMode: mode,
-      repoUrl: mode === "github" ? intakeGithubUrl().trim() : undefined,
-      cdConfigSnippet: mode === "github" ? intakeCdWorkflow().trim() : undefined,
-      targetUrl: mode === "url-dns" ? intakeTargetUrl().trim() : undefined,
-      binaryFileName: mode === "binary" ? intakeBinaryName().trim() : undefined,
-      binarySizeBytes: mode === "binary" ? intakeBinarySize() : undefined,
-      binaryHexPreview: mode === "binary" ? intakeBinaryHexPreview() : undefined,
-    };
-
-    try {
-      const res = await fetch("/api/modules/aegis/projects", {
-        method: "POST",
-        headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        throw new Error(`Failed to register target project (HTTP ${res.status})`);
-      }
-      const raw = (await res.json()) as { project?: AegisProject } & AegisProject;
-      let created: AegisProject = raw.project ?? raw;
-
-      if (mode === "binary") {
-        const base64Payload = binaryBase64Data() || hexPreviewToBase64(intakeBinaryHexPreview());
-        if (base64Payload && created.id) {
-          const uploaded = await uploadBinaryBytesToProject(
-            created.id,
-            intakeBinaryName().trim() || created.binaryFileName || "artifact.elf",
-            base64Payload,
-          );
-          if (uploaded) {
-            created = uploaded;
-          }
-        }
-      }
-
-      updateProjectInList(created);
-      setShowIntakeForm(false);
-      setStatusBanner(
-        `Registered new ${(created.intakeMode ?? mode).toUpperCase()} target "${created.name}".`,
+      setNotice(
+        enabled
+          ? "Route Shield virtual patch ENABLED — exploit payloads are now blocked at the edge."
+          : "Route Shield virtual patch DISABLED — target route is exposed to raw requests.",
       );
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "Could not create target project");
+      setError(err instanceof Error ? err.message : "Failed to toggle Route Shield");
     }
   }
 
-  function selectDemoPreset(projectId: string, label: string) {
-    setSelectedId(projectId);
-    setStatusBanner(`Loaded ${label}`);
+  async function handleTestAttack(projectId: string) {
+    setError(null);
+    try {
+      const res = await aegisFetch<AegisShieldTestAttackResponse>(
+        `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/test-attack`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            projectId,
+            attackPayload: attackPayload(),
+          }),
+        },
+      );
+      setAttackResult(res);
+      updateProjectInList(res.project);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Live attack test failed");
+    }
   }
 
-  function defenseBadgeClass(status: string) {
-    if (
-      status === "patched_via_pr" ||
-      status === "protected_via_route_shield" ||
-      status === "binary_hard_patched" ||
-      status === "passed_green"
-    ) {
-      return "bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400";
+  function defenseBadgeVariant(status: AegisProject["defenseStatus"]) {
+    switch (status) {
+      case "patched_via_pr":
+      case "protected_via_route_shield":
+      case "binary_hard_patched":
+        return "emerald" as const;
+      case "poc_confirmed_red":
+        return "red" as const;
+      default:
+        return "amber" as const;
     }
-    if (status === "poc_confirmed_red" || status === "confirmed_red" || status === "failed") {
-      return "bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400";
+  }
+
+  function defenseBadgeLabel(status: AegisProject["defenseStatus"]) {
+    switch (status) {
+      case "patched_via_pr":
+        return "VERIFIED GREEN • PR READY";
+      case "protected_via_route_shield":
+        return "VERIFIED GREEN • SHIELD ON";
+      case "binary_hard_patched":
+        return "VERIFIED GREEN • ELF PATCHED";
+      case "poc_confirmed_red":
+        return "EXPLOITABLE RED";
+      default:
+        return "PENDING VERIFICATION";
     }
-    if (status === "running") {
-      return "bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400";
+  }
+
+  function intakeBadgeLabel(mode: AegisIntakeMode) {
+    switch (mode) {
+      case "github":
+        return "GitHub Repository";
+      case "url-dns":
+        return "Live URL + DNS Gate";
+      case "binary":
+        return "No-Source ELF64 Binary";
     }
-    return "bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400";
   }
 
   return (
-    <div class="space-y-5">
-      {/* 1. Top AEGIS-4 Command Header & 3-Minute Live Demo Bar */}
-      <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
-        <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
-          <div class="space-y-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                AEGIS-4 • Autonomous Self-Healing Security Platform
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                Zero-False-Positive Sandbox PoC Gate
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-neutral-800 dark:text-neutral-300 font-mono">
-                backend: {backendMode()}
-              </span>
-            </div>
-            <h1 class="text-lg md:text-xl font-semibold text-gray-800 dark:text-neutral-100">
-              Autonomous Red-to-Green Exploitation, Source PR Synthesis, Edge Shield &amp; ELF
-              Binary Patching
-            </h1>
-          </div>
-
-          <div class="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowIntakeForm((prev) => !prev)}
-              class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer transition-colors"
-            >
-              {showIntakeForm()
-                ? "✕ Close Intake Drawer"
-                : "+ New Target Intake (GitHub / URL+DNS / Binary)"}
-            </button>
-          </div>
-        </div>
-
-        {/* Model Fleet Strip + 3-Minute Live Demo Quick-Jump Bar */}
-        <div class="p-4 md:p-5 space-y-3 bg-gray-50/60 dark:bg-neutral-950/50 rounded-b-xl">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div class="flex flex-wrap items-center gap-1.5">
-              <span class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400 mr-1">
-                Multi-Model Fleet:
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400 font-mono">
-                gemini-4-argon 1M
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400 font-mono">
-                antigravity-preview-09-2026 Sandbox
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500 font-mono">
-                gemini-3.8-flash Recon
-              </span>
-              <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400 font-mono">
-                gemini-3.5-flash-lite Classifier
-              </span>
-            </div>
-          </div>
-
-          <div class="pt-2 border-t border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-2">
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="text-xs font-semibold text-gray-600 dark:text-neutral-400">
-                3-Minute Live Demo Bar:
-              </span>
-              <button
-                type="button"
-                onClick={() =>
-                  selectDemoPreset(
-                    "aegis-whitebox-github",
-                    "Demo 1: White-Box GitHub + CD → Auto PR & Report",
-                  )
-                }
-                class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                  selectedId() === "aegis-whitebox-github"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50"
-                }`}
-              >
-                🎬 Demo 1: White-Box GitHub + CD → Auto PR &amp; Report
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  selectDemoPreset(
-                    "aegis-blackbox-url-shield",
-                    "Demo 2: External URL + DNS TXT Gate → 1-Click Route Shield (403)",
-                  )
-                }
-                class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                  selectedId() === "aegis-blackbox-url-shield"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50"
-                }`}
-              >
-                🎬 Demo 2: External URL + DNS TXT Gate → 1-Click Route Shield (403)
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  selectDemoPreset(
-                    "aegis-blackbox-binary-elf",
-                    "Demo 3: No-Source ELF Binary → Byte Hard-Patch & Download",
-                  )
-                }
-                class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                  selectedId() === "aegis-blackbox-binary-elf"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50"
-                }`}
-              >
-                🎬 Demo 3: No-Source ELF Binary → Byte Hard-Patch &amp; Download
-              </button>
-            </div>
-
+    <div class="w-full">
+      {/* Dedicated Ops & Engine Console Verification View */}
+      <Show when={isOpsMode()}>
+        <div class="space-y-6">
+          <PrelineCard
+            title="4-Stage Red-to-Green Formal Sandbox Verification Matrix"
+            subtitle="Deterministic PoC reproduction, patch synthesis, and zero-regression execution telemetry"
+            headerRight={
+              <div class="flex flex-wrap items-center gap-2">
+                <For each={projects()}>
+                  {(p) => (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedProjectId(p.id)}
+                      class={`h-10 px-4 rounded-full text-[13px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                        selectedProjectId() === p.id
+                          ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                          : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                      }`}
+                    >
+                      {p.name}
+                    </button>
+                  )}
+                </For>
+              </div>
+            }
+          >
             <Show when={selectedProject()}>
               {(proj) => (
-                <button
-                  type="button"
-                  disabled={runningPipeline()}
-                  onClick={() => void handleRunScan(proj())}
-                  class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors"
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <For each={liveSteps().length > 0 ? liveSteps() : proj().timeline}>
+                    {(step, idx) => (
+                      <div class="p-4 rounded-[16px] border border-[#EAECF0] dark:border-[#252830] bg-[#F2F4F7] dark:bg-[#212329] flex flex-col justify-between gap-3">
+                        <div>
+                          <div class="flex items-center justify-between gap-2 mb-2">
+                            <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF]">
+                              Stage {idx() + 1}
+                            </span>
+                            <PrelineBadge
+                              variant={
+                                step.status === "passed_green"
+                                  ? "emerald"
+                                  : step.status === "confirmed_red"
+                                    ? "red"
+                                    : "blue"
+                              }
+                              dot
+                            >
+                              {step.status.toUpperCase()}
+                            </PrelineBadge>
+                          </div>
+                          <h4 class="text-[16px] leading-[24px] font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                            {step.title}
+                          </h4>
+                          <p class="text-[13px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF] mt-1">
+                            {step.summary}
+                          </p>
+                        </div>
+
+                        <div class="space-y-2">
+                          <div class="flex items-center justify-between text-[12px] font-mono text-[#6B7280] dark:text-[#6E7686] tabular-nums">
+                            <span>{step.modelUsed}</span>
+                            <span>{step.durationMs} ms</span>
+                          </div>
+                          <pre class="p-3 rounded-[8px] bg-white dark:bg-[#17181C] border border-[#EAECF0] dark:border-[#252830] text-[13px] leading-[20px] text-[#111827] dark:text-[#F3F4F6] font-mono overflow-x-auto whitespace-pre-wrap">
+                            {step.commandOrLog}
+                          </pre>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              )}
+            </Show>
+          </PrelineCard>
+        </div>
+      </Show>
+
+      {/* Product Mode: DESIGN.md Desktop App Shell (390px-400px Left Sidebar + 48px Reader Canvas) */}
+      <Show when={!isOpsMode()}>
+        <div class="min-h-[calc(100vh-120px)] flex flex-col lg:flex-row items-stretch">
+          {/* Left Configuration Sidebar (390px-400px fixed desktop width, 24px internal padding, 20px vertical section gap) */}
+          <aside
+            aria-label="Monitored Security Targets"
+            class="w-full lg:w-[390px] xl:w-[400px] shrink-0 bg-white dark:bg-[#17181C] border-b lg:border-b-0 lg:border-r border-[#EAECF0] dark:border-[#252830] p-6 space-y-5 flex flex-col justify-between"
+          >
+            <div class="space-y-5">
+              {/* Sidebar Header: ONE primary CTA (#4F46E5) */}
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4F46E5] dark:text-[#818CF8]">
+                    Target Inventory
+                  </span>
+                  <h2 class="text-[18px] leading-[28px] font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                    Protected Assets ({projects().length})
+                  </h2>
+                </div>
+                <PrelineButton
+                  variant="primary"
+                  size="sm"
+                  data-testid="toggle-new-project-btn"
+                  onClick={() => setShowNewForm(true)}
                 >
-                  {runningPipeline()
-                    ? "⏳ Streaming 4-Stage Sandbox Loop..."
-                    : "⚡ Run Full 4-Stage Self-Healing Loop (Red → Green)"}
-                </button>
+                  + New Target
+                </PrelineButton>
+              </div>
+
+              {/* Target List Cards (12px vertical gap, 16px radius, 24px horizontal / 20px vertical padding) */}
+              <div class="space-y-3">
+                <For each={projects()}>
+                  {(p) => {
+                    const isSelected = () => selectedProjectId() === p.id;
+                    const critCount = () =>
+                      p.vulnerabilities.filter((v) => v.severity === "critical").length;
+                    return (
+                      <button
+                        type="button"
+                        data-testid={`project-card-${p.id}`}
+                        onClick={() => {
+                          setSelectedProjectId(p.id);
+                          setAttackResult(null);
+                          setAegisProductSection("projects");
+                        }}
+                        class={`w-full text-left px-6 py-5 rounded-[16px] border transition-all cursor-pointer ${
+                          isSelected()
+                            ? "bg-[#EEF2FF]/65 border-[1.5px] border-[#4F46E5] shadow-[0_1px_2px_rgba(16,24,40,0.04)] dark:bg-indigo-500/12 dark:border-[#818CF8]"
+                            : "bg-white border-[#EAECF0] hover:border-[#DFE3E8] hover:bg-[#F8F9FA] dark:bg-[#17181C] dark:border-[#252830] dark:hover:bg-[#212329]"
+                        }`}
+                      >
+                        <div class="flex items-center justify-between gap-2 mb-2">
+                          <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF]">
+                            {intakeBadgeLabel(p.intakeMode)}
+                          </span>
+                          <PrelineBadge variant={defenseBadgeVariant(p.defenseStatus)} dot>
+                            {defenseBadgeLabel(p.defenseStatus)}
+                          </PrelineBadge>
+                        </div>
+
+                        <h3 class="text-[16px] leading-[24px] font-semibold text-[#111827] dark:text-[#F3F4F6] truncate">
+                          {p.name}
+                        </h3>
+
+                        <p class="mt-1 text-[13px] leading-[20px] font-mono text-[#4B5563] dark:text-[#9CA3AF] truncate">
+                          {p.repoUrl ?? p.targetUrl ?? p.binaryFileName}
+                        </p>
+
+                        <div class="mt-3 pt-3 border-t border-[#EAECF0] dark:border-[#252830] flex items-center justify-between text-[13px] leading-[20px] tabular-nums">
+                          <span class="text-[#4B5563] dark:text-[#9CA3AF] font-medium">
+                            {p.vulnerabilities.length} finding
+                            {p.vulnerabilities.length === 1 ? "" : "s"} ({critCount()} critical)
+                          </span>
+                          <Show when={!p.dnsVerified && p.intakeMode === "url-dns"}>
+                            <span class="text-[#B45309] dark:text-[#FFDDA5] font-semibold">
+                              DNS Pending
+                            </span>
+                          </Show>
+                        </div>
+                      </button>
+                    );
+                  }}
+                </For>
+              </div>
+            </div>
+
+            {/* Sidebar Footer: Clean Demo Reset & Summary */}
+            <div class="pt-4 border-t border-[#EAECF0] dark:border-[#252830] flex items-center justify-between gap-2">
+              <span class="text-[13px] leading-[20px] text-[#6B7280] dark:text-[#6E7686] tabular-nums">
+                {
+                  projects().filter(
+                    (p) =>
+                      p.defenseStatus === "patched_via_pr" ||
+                      p.defenseStatus === "protected_via_route_shield" ||
+                      p.defenseStatus === "binary_hard_patched",
+                  ).length
+                }{" "}
+                / {projects().length} targets verified green
+              </span>
+              <PrelineButton
+                variant="secondary"
+                size="xs"
+                data-testid="reset-demo-projects-btn"
+                disabled={loading()}
+                onClick={handleResetDemoProjects}
+              >
+                Reset Demo
+              </PrelineButton>
+            </div>
+          </aside>
+
+          {/* Main Workspace / Reader Canvas (48px outer padding on desktop) */}
+          <div class="flex-1 min-w-0 p-6 lg:p-12 space-y-6">
+            <Show when={error()}>
+              {(errMsg) => (
+                <PrelineAlert variant="red" title="Security Operation Error">
+                  {errMsg()}
+                </PrelineAlert>
+              )}
+            </Show>
+
+            <Show when={notice()}>
+              {(msg) => (
+                <PrelineAlert variant="teal" title="Verification Update">
+                  {msg()}
+                </PrelineAlert>
+              )}
+            </Show>
+
+            <Show
+              when={selectedProject()}
+              fallback={
+                <div class="bg-white dark:bg-[#17181C] border border-[#EAECF0] dark:border-[#252830] rounded-[24px] p-6 lg:p-12 text-center">
+                  <p class="text-[15px] leading-[24px] text-[#4B5563] dark:text-[#9CA3AF]">
+                    Select a security target from the left sidebar to inspect findings and
+                    remediation artifacts.
+                  </p>
+                </div>
+              }
+            >
+              {(proj) => (
+                /* Primary Reading & Workspace Sheet (rounded-[24px], 48px internal padding on desktop) */
+                <section
+                  aria-label="Target Security Workspace"
+                  class="bg-white dark:bg-[#17181C] border border-[#EAECF0] dark:border-[#252830] rounded-[24px] p-6 lg:p-12 shadow-[0_1px_2px_rgba(16,24,40,0.04)] space-y-6"
+                >
+                  {/* Workspace Sheet Header: Target Metadata + ONE Primary Scan Action */}
+                  <div class="flex flex-col xl:flex-row xl:items-start justify-between gap-6 pb-6 border-b border-[#EAECF0] dark:border-[#252830]">
+                    <div class="space-y-2">
+                      <div class="flex flex-wrap items-center gap-2.5">
+                        <PrelineBadge variant="blue">
+                          {intakeBadgeLabel(proj().intakeMode)}
+                        </PrelineBadge>
+                        <PrelineBadge variant={defenseBadgeVariant(proj().defenseStatus)} dot>
+                          {defenseBadgeLabel(proj().defenseStatus)}
+                        </PrelineBadge>
+                        <span class="text-[13px] leading-[20px] text-[#6B7280] dark:text-[#6E7686] tabular-nums">
+                          Scan Latency: {proj().lastScanDurationMs} ms
+                        </span>
+                      </div>
+
+                      <h1 class="text-[28px] leading-[36px] font-bold tracking-[-0.02em] text-[#111827] dark:text-[#F3F4F6]">
+                        {proj().name}
+                      </h1>
+
+                      <p class="text-[13px] leading-[20px] font-mono text-[#4B5563] dark:text-[#9CA3AF] break-all">
+                        {proj().repoUrl ?? proj().targetUrl ?? proj().binaryFileName}
+                      </p>
+                    </div>
+
+                    {/* Action Group: Strictly ONE Primary Button (#4F46E5) per active view */}
+                    <div class="flex flex-wrap items-center gap-3 shrink-0">
+                      <Show when={proj().intakeMode === "binary"}>
+                        <label class="h-10 px-4 inline-flex items-center gap-2 text-[14px] leading-[20px] font-semibold rounded-[12px] border border-[#DFE3E8] bg-white text-[#111827] hover:bg-[#F8F9FA] dark:bg-[#17181C] dark:border-[#2E323C] dark:text-[#F3F4F6] cursor-pointer">
+                          <span>{uploadingBinary() ? "Uploading ELF..." : "Upload ELF/PE"}</span>
+                          <input
+                            type="file"
+                            class="hidden"
+                            aria-label="Upload ELF or PE binary"
+                            onChange={(e) => {
+                              const f = e.currentTarget.files?.[0];
+                              if (f) void handleBinaryFileSelect(proj().id, f);
+                            }}
+                          />
+                        </label>
+                      </Show>
+
+                      <PrelineButton
+                        variant="secondary"
+                        size="sm"
+                        data-testid="rescan-btn"
+                        disabled={
+                          scanning() || (proj().intakeMode === "url-dns" && !proj().dnsVerified)
+                        }
+                        onClick={() => handleRunScan(proj().id, proj().remediationMode)}
+                      >
+                        {scanning() ? "Scanning..." : "Quick Re-Scan"}
+                      </PrelineButton>
+
+                      <PrelineButton
+                        variant={aegisProductSection() === "remediation" ? "secondary" : "primary"}
+                        size="sm"
+                        data-testid="stream-scan-btn"
+                        disabled={
+                          scanning() || (proj().intakeMode === "url-dns" && !proj().dnsVerified)
+                        }
+                        onClick={() => handleStreamScan(proj().id, proj().remediationMode)}
+                      >
+                        {scanning() ? "Verifying in Sandbox..." : "Run Security Scan"}
+                      </PrelineButton>
+                    </div>
+                  </div>
+
+                  {/* DNS TXT Ownership Gate Card (Shown when URL target is unverified) */}
+                  <Show when={proj().intakeMode === "url-dns" && !proj().dnsVerified}>
+                    <div
+                      data-testid="dns-verify-card"
+                      class="rounded-[16px] p-6 bg-[#FEF3C7]/60 border border-[#B45309]/25 dark:bg-[#470E00]/50 dark:border-[#FFDDA5]/25 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                    >
+                      <div class="space-y-1.5">
+                        <div class="flex items-center gap-2">
+                          <PrelineBadge variant="amber" dot>
+                            Authorization Gate Required
+                          </PrelineBadge>
+                          <span class="text-[14px] leading-[20px] font-semibold text-[#B45309] dark:text-[#FFDDA5]">
+                            DNS TXT Domain Ownership Verification
+                          </span>
+                        </div>
+                        <p class="text-[14px] leading-[22px] text-[#111827] dark:text-[#F3F4F6]">
+                          Active black-box fuzzing is locked until domain ownership is confirmed for{" "}
+                          <code class="font-mono font-semibold">{proj().dnsDomain}</code>.
+                        </p>
+                        <div class="pt-1 font-mono text-[13px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF]">
+                          TXT Record:{" "}
+                          <span class="font-semibold text-[#111827] dark:text-[#F3F4F6]">
+                            {proj().dnsTxtRecordName}
+                          </span>{" "}
+                          ={" "}
+                          <span class="font-semibold text-[#4F46E5] dark:text-[#818CF8]">
+                            {proj().dnsTxtToken}
+                          </span>
+                        </div>
+                      </div>
+
+                      <PrelineButton
+                        variant="amber"
+                        size="sm"
+                        data-testid="dns-verify-btn"
+                        disabled={verifyingDns()}
+                        onClick={() => handleVerifyDns(proj().id)}
+                      >
+                        {verifyingDns() ? "Checking DNS TXT..." : "Verify DNS Ownership"}
+                      </PrelineButton>
+                    </div>
+                  </Show>
+
+                  {/* Compact 4-Step Verification Status Stepper */}
+                  <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <For each={liveSteps().length > 0 ? liveSteps() : proj().timeline}>
+                      {(step, idx) => (
+                        <div class="px-4 py-3.5 rounded-[12px] bg-[#F2F4F7] dark:bg-[#212329] border border-[#EAECF0] dark:border-[#252830] flex items-center justify-between gap-2">
+                          <div class="min-w-0">
+                            <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF] block">
+                              Step {idx() + 1}
+                            </span>
+                            <span class="text-[14px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6] truncate block">
+                              {step.title}
+                            </span>
+                          </div>
+                          <PrelineBadge
+                            variant={
+                              step.status === "passed_green"
+                                ? "emerald"
+                                : step.status === "confirmed_red"
+                                  ? "red"
+                                  : "blue"
+                            }
+                          >
+                            {step.durationMs}ms
+                          </PrelineBadge>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+
+                  {/* Section 1: Confirmed Vulnerability Findings (Full in "projects" / "vulnerabilities", Compact Summary Strip in "remediation") */}
+                  <Show
+                    when={
+                      aegisProductSection() === "projects" ||
+                      aegisProductSection() === "vulnerabilities"
+                    }
+                    fallback={
+                      <Show when={proj().vulnerabilities[0]}>
+                        {(firstVuln) => (
+                          <div class="px-5 py-3.5 rounded-[12px] bg-[#F8F9FA] dark:bg-[#212329]/60 border border-[#EAECF0] dark:border-[#252830] flex flex-wrap items-center justify-between gap-3">
+                            <div class="flex flex-wrap items-center gap-2.5 min-w-0">
+                              <PrelineBadge variant="red">
+                                {firstVuln().severity.toUpperCase()} • CVSS{" "}
+                                {firstVuln().cvssScore.toFixed(1)}
+                              </PrelineBadge>
+                              <PrelineBadge variant="blue">{firstVuln().cveOrCwe}</PrelineBadge>
+                              <span class="text-[14px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6] truncate">
+                                {firstVuln().title}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setAegisProductSection("vulnerabilities")}
+                              class="text-[13px] leading-[20px] font-semibold text-[#4F46E5] dark:text-[#818CF8] hover:underline cursor-pointer shrink-0"
+                            >
+                              ← Inspect Finding Details
+                            </button>
+                          </div>
+                        )}
+                      </Show>
+                    }
+                  >
+                    <div class="space-y-4">
+                      <div class="flex items-center justify-between gap-2">
+                        <div>
+                          <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4F46E5] dark:text-[#818CF8]">
+                            Zero False-Positive Guarantee
+                          </span>
+                          <h2 class="text-[20px] leading-[28px] font-semibold tracking-[-0.015em] text-[#111827] dark:text-[#F3F4F6]">
+                            Confirmed Vulnerabilities ({proj().vulnerabilities.length})
+                          </h2>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAegisProductSection("remediation")}
+                          class="text-[14px] leading-[20px] font-semibold text-[#4F46E5] dark:text-[#818CF8] hover:underline cursor-pointer"
+                        >
+                          Open Remediation Artifacts →
+                        </button>
+                      </div>
+
+                      <Show
+                        when={proj().vulnerabilities.length > 0}
+                        fallback={
+                          <PrelineAlert variant="amber" title="Awaiting Initial Verification Scan">
+                            Verify domain ownership (if required) and click{" "}
+                            <strong>Run Security Scan</strong> to execute the 4-stage Red-to-Green
+                            verification pipeline.
+                          </PrelineAlert>
+                        }
+                      >
+                        <div class="space-y-4">
+                          <For each={proj().vulnerabilities}>
+                            {(vuln) => {
+                              const isExpanded = () => expandedFindingId() === vuln.id;
+                              return (
+                                <div class="rounded-[16px] border border-[#EAECF0] dark:border-[#252830] bg-white dark:bg-[#17181C] p-6 space-y-4">
+                                  <div class="flex flex-wrap items-start justify-between gap-3">
+                                    <div class="space-y-1">
+                                      <div class="flex flex-wrap items-center gap-2">
+                                        <PrelineBadge
+                                          variant={
+                                            vuln.severity === "critical" || vuln.severity === "high"
+                                              ? "red"
+                                              : "amber"
+                                          }
+                                        >
+                                          {vuln.severity.toUpperCase()} • CVSS{" "}
+                                          {vuln.cvssScore.toFixed(1)}
+                                        </PrelineBadge>
+                                        <PrelineBadge variant="blue">{vuln.cveOrCwe}</PrelineBadge>
+                                        <Show when={vuln.zeroFalsePositiveConfirmed}>
+                                          <PrelineBadge variant="emerald" dot>
+                                            PoC Reproduced &amp; Verified Green
+                                          </PrelineBadge>
+                                        </Show>
+                                      </div>
+                                      <h3 class="text-[18px] leading-[28px] font-semibold text-[#111827] dark:text-[#F3F4F6] pt-1">
+                                        {vuln.title}
+                                      </h3>
+                                      <p class="text-[13px] leading-[20px] font-mono text-[#4F46E5] dark:text-[#818CF8]">
+                                        Location: {vuln.location}
+                                      </p>
+                                    </div>
+
+                                    <PrelineButton
+                                      variant="secondary"
+                                      size="xs"
+                                      onClick={() =>
+                                        setExpandedFindingId(isExpanded() ? null : vuln.id)
+                                      }
+                                    >
+                                      {isExpanded() ? "Hide PoC Evidence" : "Inspect PoC Evidence"}
+                                    </PrelineButton>
+                                  </div>
+
+                                  <p class="text-[15px] leading-[24px] text-[#4B5563] dark:text-[#9CA3AF]">
+                                    {vuln.rootCause}
+                                  </p>
+
+                                  <Show when={isExpanded()}>
+                                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-2">
+                                      <div class="p-4 rounded-[12px] bg-[#FEE2E2]/45 border border-[#B91C1C]/20 dark:bg-[#7F1D1D]/20 dark:border-[#FECACA]/20 space-y-1.5">
+                                        <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#B91C1C] dark:text-[#FECACA] block">
+                                          Stage 2 — Red PoC Exploit Log
+                                        </span>
+                                        <pre class="text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] whitespace-pre-wrap">
+                                          {vuln.pocRedLog}
+                                        </pre>
+                                      </div>
+                                      <div class="p-4 rounded-[12px] bg-[#DCFCE7]/45 border border-[#15803D]/20 dark:bg-[#053C01]/25 dark:border-[#B0F4B2]/20 space-y-1.5">
+                                        <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#15803D] dark:text-[#B0F4B2] block">
+                                          Stage 4 — Green Verification Log
+                                        </span>
+                                        <pre class="text-[13px] leading-[20px] font-mono text-[#111827] dark:text-[#F3F4F6] whitespace-pre-wrap">
+                                          {vuln.verifyGreenLog}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  </Show>
+                                </div>
+                              );
+                            }}
+                          </For>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+
+                  {/* Section 2: Tri-Mode Remediation & Verification Sandbox Panel */}
+                  <AegisPatchInsightPanel
+                    project={proj()}
+                    liveSteps={liveSteps()}
+                    expanded={aegisProductSection() === "remediation"}
+                    onExpand={() => setAegisProductSection("remediation")}
+                    attackPayload={attackPayload()}
+                    setAttackPayload={setAttackPayload}
+                    attackResult={attackResult()}
+                    onToggleShield={(enabled) => handleToggleShield(proj().id, enabled)}
+                    onTestAttack={() => handleTestAttack(proj().id)}
+                    onProjectUpdate={updateProjectInList}
+                  />
+                </section>
               )}
             </Show>
           </div>
         </div>
-      </div>
 
-      {/* Status & Error Banners */}
-      <Show when={statusBanner()}>
-        {(msg) => (
-          <div class="p-3.5 rounded-xl border border-teal-200 bg-teal-50 text-teal-900 dark:bg-teal-950/40 dark:border-teal-800 dark:text-teal-200 flex items-center justify-between gap-3 text-sm">
-            <span>{msg()}</span>
-            <button
-              type="button"
-              onClick={() => setStatusBanner(null)}
-              class="py-1 px-2 text-xs font-medium rounded-lg bg-teal-100 text-teal-800 hover:bg-teal-200 dark:bg-teal-800/40 dark:text-teal-300 cursor-pointer"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-      </Show>
-
-      <Show when={errorBanner()}>
-        {(err) => (
-          <div class="p-3.5 rounded-xl border border-red-200 bg-red-50 text-red-900 dark:bg-red-950/40 dark:border-red-800 dark:text-red-200 flex items-center justify-between gap-3 text-sm">
-            <span>{err()}</span>
-            <button
-              type="button"
-              onClick={() => setErrorBanner(null)}
-              class="py-1 px-2 text-xs font-medium rounded-lg bg-red-100 text-red-800 hover:bg-red-200 dark:bg-red-800/40 dark:text-red-300 cursor-pointer"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-      </Show>
-
-      {/* 2. Preline 4-Column KPI Row */}
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
-          <span class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-            Protected Targets
-          </span>
-          <div class="mt-2 flex items-baseline justify-between">
-            <span class="text-2xl font-bold text-gray-800 dark:text-neutral-100">
-              {kpiStats().totalTargets}
-            </span>
-            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-              GitHub / URL / ELF
-            </span>
-          </div>
-          <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">
-            White-box repos, DNS-verified URLs &amp; raw binaries
-          </p>
-        </div>
-
-        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
-          <span class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-            Zero-False-Positive Confirmed PoCs (RED)
-          </span>
-          <div class="mt-2 flex items-baseline justify-between">
-            <span class="text-2xl font-bold text-red-600 dark:text-red-400">
-              {kpiStats().confirmedRed}
-            </span>
-            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400">
-              100% Reproducible
-            </span>
-          </div>
-          <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">
-            Every finding proven via live Docker sandbox exploit
-          </p>
-        </div>
-
-        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
-          <span class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-            Autonomous Remediations Verified (GREEN)
-          </span>
-          <div class="mt-2 flex items-baseline justify-between">
-            <span class="text-2xl font-bold text-teal-600 dark:text-teal-400">
-              {kpiStats().verifiedGreen}
-            </span>
-            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500">
-              Re-Attack Blocked
-            </span>
-          </div>
-          <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">
-            Identical PoC re-executed against patch to prove closure
-          </p>
-        </div>
-
-        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5">
-          <span class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-neutral-400">
-            Active Route Shield Blocks
-          </span>
-          <div class="mt-2 flex items-baseline justify-between">
-            <span class="text-2xl font-bold text-blue-600 dark:text-blue-400">
-              {kpiStats().shieldBlocks}
-            </span>
-            <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-              HTTP 403 Virtual Patch
-            </span>
-          </div>
-          <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">
-            Zero-downtime edge hotfix filter before source redeploy
-          </p>
-        </div>
-      </div>
-
-      {/* 3. Collapsible 3-Mode Project Intake & DNS TXT Ownership Gate Card */}
-      <Show when={showIntakeForm()}>
-        <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
-          <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-100">
-                3-Mode Target Intake &amp; Scope Authorization
-              </h2>
-              <p class="text-xs text-gray-500 dark:text-neutral-400">
-                Onboard a White-Box GitHub + CD pipeline, an External URL gated by DNS TXT
-                ownership, or a No-Source ELF/PE/Mach-O binary.
-              </p>
-            </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIntakeMode("github")}
-                class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                  intakeMode() === "github"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400"
-                }`}
-              >
-                1. GitHub Repo + CD YAML
-              </button>
-              <button
-                type="button"
-                onClick={() => setIntakeMode("url-dns")}
-                class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                  intakeMode() === "url-dns"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400"
-                }`}
-              >
-                2. Target URL + DNS TXT Ownership Gate
-              </button>
-              <button
-                type="button"
-                onClick={() => setIntakeMode("binary")}
-                class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                  intakeMode() === "binary"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400"
-                }`}
-              >
-                3. Binary Artifact Upload (ELF/PE/Mach-O)
-              </button>
-            </div>
-          </div>
-
-          <form onSubmit={(e) => void handleCreateProject(e)} class="p-4 md:p-5 space-y-4">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label
-                  for="aegis-intake-name"
-                  class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
-                >
-                  Target Project Name
-                </label>
-                <input
-                  id="aegis-intake-name"
-                  type="text"
-                  value={intakeName()}
-                  onInput={(e) => setIntakeName(e.currentTarget.value)}
-                  class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500"
-                  placeholder="e.g. Settlement API Service"
-                />
-              </div>
-
-              <Show when={intakeMode() === "github"}>
+        {/* Clean Modal Dialog for Target Onboarding (DESIGN.md Elevated Surface #FFFFFF / #1D1F25) */}
+        <Show when={showNewForm()}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-target-modal-title"
+            class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px]"
+          >
+            <div class="w-full max-w-[560px] bg-white dark:bg-[#1D1F25] border border-[#EAECF0] dark:border-[#252830] rounded-[24px] p-6 lg:p-8 shadow-xl space-y-6">
+              <div class="flex items-start justify-between gap-4">
                 <div>
-                  <label
-                    for="aegis-intake-github"
-                    class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
-                  >
-                    GitHub Repository URL
-                  </label>
-                  <input
-                    id="aegis-intake-github"
-                    type="text"
-                    value={intakeGithubUrl()}
-                    onInput={(e) => setIntakeGithubUrl(e.currentTarget.value)}
-                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                  />
-                </div>
-                <div class="md:col-span-2">
-                  <label
-                    for="aegis-intake-cd"
-                    class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
-                  >
-                    Continuous Deployment (CD) Workflow YAML Snippet
-                  </label>
-                  <textarea
-                    id="aegis-intake-cd"
-                    rows={3}
-                    value={intakeCdWorkflow()}
-                    onInput={(e) => setIntakeCdWorkflow(e.currentTarget.value)}
-                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-xs font-mono focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                  />
-                </div>
-              </Show>
-
-              <Show when={intakeMode() === "url-dns"}>
-                <div>
-                  <label
-                    for="aegis-intake-url"
-                    class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
-                  >
-                    Target Base URL (Requires `_aegis-verify` DNS TXT Record)
-                  </label>
-                  <input
-                    id="aegis-intake-url"
-                    type="text"
-                    value={intakeTargetUrl()}
-                    onInput={(e) => setIntakeTargetUrl(e.currentTarget.value)}
-                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                  />
-                </div>
-              </Show>
-
-              <Show when={intakeMode() === "binary"}>
-                <div>
-                  <label
-                    for="aegis-intake-binary-name"
-                    class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
-                  >
-                    Binary Artifact Filename (Preset or Custom)
-                  </label>
-                  <input
-                    id="aegis-intake-binary-name"
-                    type="text"
-                    value={intakeBinaryName()}
-                    onInput={(e) => setIntakeBinaryName(e.currentTarget.value)}
-                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm font-mono focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                    placeholder="iot-gateway-daemon.elf"
-                  />
-                </div>
-                <div class="md:col-span-2">
-                  <label
-                    for="aegis-intake-binary-file"
-                    class="block text-xs font-medium text-gray-700 dark:text-neutral-300 mb-1"
-                  >
-                    Upload Compiled Binary Artifact (ELF / PE / Mach-O — Read via FileReader Base64
-                    for Go `debug/elf`, `debug/pe`, `debug/macho` &amp; SHA-256 Inspection)
-                  </label>
-                  <input
-                    id="aegis-intake-binary-file"
-                    type="file"
-                    accept=".elf,.bin,.exe,.dll,.so,.dylib,.apk,application/octet-stream"
-                    onChange={(e) => void handleBinaryFileChange(e)}
-                    class="py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200"
-                  />
-                </div>
-                <div class="md:col-span-2 space-y-3 p-3.5 rounded-xl bg-gray-50 dark:bg-neutral-950 border border-gray-200 dark:border-neutral-800">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <span class="text-xs font-semibold text-gray-700 dark:text-neutral-300">
-                      Quick Binary Presets:
-                    </span>
-                    <div class="flex flex-wrap gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          applyBinaryPreset(
-                            "iot-gateway-daemon.elf",
-                            148_920,
-                            "7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 02 00 3e 00 01 00 00 00",
-                          )
-                        }
-                        class="py-1 px-2 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 cursor-pointer"
-                      >
-                        ELF64 x86_64 Daemon
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          applyBinaryPreset(
-                            "edge-signer-service.exe",
-                            212_480,
-                            "4d 5a 90 00 03 00 00 00 04 00 00 00 ff ff 00 00 b8 00 00 00 00 00 00 00",
-                          )
-                        }
-                        class="py-1 px-2 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 cursor-pointer"
-                      >
-                        PE32+ x64 Service
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          applyBinaryPreset(
-                            "darwin-telemetry-agent.macho",
-                            184_320,
-                            "cf fa ed fe 0c 00 00 01 00 00 00 00 02 00 00 00 10 00 00 00 88 06 00 00",
-                          )
-                        }
-                        class="py-1 px-2 text-xs font-medium rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 cursor-pointer"
-                      >
-                        Mach-O arm64 Agent
-                      </button>
-                    </div>
-                  </div>
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-gray-200 dark:border-neutral-800">
-                    <div>
-                      <span class="text-xs text-gray-500 dark:text-neutral-400 block">
-                        Filename &amp; Byte Size
-                      </span>
-                      <span class="text-xs font-mono font-semibold text-gray-800 dark:text-neutral-200">
-                        {intakeBinaryName()} ({intakeBinarySize().toLocaleString()} bytes)
-                      </span>
-                    </div>
-                    <div>
-                      <span class="text-xs text-gray-500 dark:text-neutral-400 block">
-                        First 32-Byte Header Hex Preview
-                      </span>
-                      <code class="text-xs font-mono text-blue-600 dark:text-blue-400 break-all">
-                        {intakeBinaryHexPreview()}
-                      </code>
-                    </div>
-                  </div>
-                </div>
-              </Show>
-            </div>
-
-            <div class="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowIntakeForm(false)}
-                class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={uploadingBinary()}
-                class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
-              >
-                {uploadingBinary()
-                  ? "Uploading & Inspecting Binary..."
-                  : "Register Target in AEGIS-4"}
-              </button>
-            </div>
-          </form>
-        </div>
-      </Show>
-
-      {/* DNS TXT Ownership Verification Gate Banner for url-dns projects */}
-      <Show
-        when={
-          selectedProject() &&
-          selectedProject()?.intakeMode === "url-dns" &&
-          !selectedProject()?.dnsVerified
-        }
-      >
-        <div class="flex flex-col bg-amber-50/90 border border-amber-300 shadow-2xs rounded-xl dark:bg-amber-950/30 dark:border-amber-800 p-4 md:p-5">
-          <div class="flex flex-wrap items-center justify-between gap-4">
-            <div class="space-y-1">
-              <div class="flex items-center gap-2">
-                <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400">
-                  Mandatory Anti-Abuse Ownership Gate
-                </span>
-                <span class="text-xs font-mono text-amber-900 dark:text-amber-300">
-                  Target: {selectedProject()?.targetUrl ?? selectedProject()?.dnsDomain}
-                </span>
-              </div>
-              <h3 class="text-sm font-semibold text-gray-900 dark:text-neutral-100">
-                DNS TXT Domain Ownership Verification Required Before Active Sandbox Exploitation
-              </h3>
-              <p class="text-xs text-gray-700 dark:text-neutral-300">
-                Publish the following TXT record on your DNS zone to authorize AEGIS-4 active
-                fuzzing:
-                <code class="ml-1.5 px-2 py-0.5 rounded bg-white dark:bg-neutral-900 border border-amber-300 dark:border-amber-700 font-mono text-xs">
-                  {selectedProject()?.dnsTxtRecordName ??
-                    `_aegis-verify.${selectedProject()?.dnsDomain ?? "target.local"}`}{" "}
-                  IN TXT &quot;{selectedProject()?.dnsTxtToken ?? "aegis-verify=pending"}&quot;
-                </code>
-              </p>
-            </div>
-
-            <button
-              type="button"
-              disabled={verifyingDns()}
-              onClick={() => {
-                const proj = selectedProject();
-                if (proj) void handleVerifyDns(proj);
-              }}
-              class="py-2 px-3 inline-flex items-center gap-x-2 text-sm font-medium rounded-lg border border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:outline-hidden focus:bg-blue-700 disabled:opacity-50 cursor-pointer transition-colors"
-            >
-              {verifyingDns()
-                ? "Verifying DNS TXT via DoH..."
-                : "🔍 Verify DNS TXT Record (Google DoH / 1-Click Sandbox Verify)"}
-            </button>
-          </div>
-        </div>
-      </Show>
-
-      {/* 4. Target Project Selector Grid (3 Cards) */}
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Show
-          when={!loading() || projects().length > 0}
-          fallback={
-            <div class="lg:col-span-3 p-6 text-center text-sm text-gray-500 dark:text-neutral-400 bg-white dark:bg-neutral-900 rounded-xl border border-gray-200 dark:border-neutral-800">
-              Loading AEGIS-4 security targets...
-            </div>
-          }
-        >
-          <For each={projects()}>
-            {(proj) => {
-              const isSelected = () => selectedProject()?.id === proj.id;
-              return (
-                <div
-                  class={`flex flex-col bg-white border shadow-2xs rounded-xl dark:bg-neutral-900 transition-all ${
-                    isSelected()
-                      ? "border-blue-600 ring-2 ring-blue-500/20 dark:border-blue-500"
-                      : "border-gray-200 dark:border-neutral-800"
-                  }`}
-                >
-                  <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex items-center justify-between gap-x-3">
-                    <div class="flex items-center gap-2 min-w-0">
-                      <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400 uppercase font-mono">
-                        {proj.intakeMode}
-                      </span>
-                      <h3 class="text-sm font-semibold text-gray-800 dark:text-neutral-100 truncate">
-                        {proj.name}
-                      </h3>
-                    </div>
-                    <span
-                      class={`inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium ${defenseBadgeClass(
-                        proj.defenseStatus,
-                      )}`}
-                    >
-                      {proj.defenseStatus}
-                    </span>
-                  </div>
-
-                  <div class="p-4 md:p-5 flex-1 flex flex-col justify-between space-y-3">
-                    <div class="space-y-1.5 text-xs text-gray-600 dark:text-neutral-400">
-                      <p class="text-xs text-gray-500 dark:text-neutral-400">{proj.subtitle}</p>
-                      <Show when={proj.repoUrl}>
-                        <div class="truncate font-mono">
-                          <span class="font-semibold text-gray-700 dark:text-neutral-300">
-                            Repo:{" "}
-                          </span>
-                          {proj.repoUrl}
-                        </div>
-                      </Show>
-                      <Show when={proj.cdWorkflowPath}>
-                        <div class="truncate font-mono">
-                          <span class="font-semibold text-gray-700 dark:text-neutral-300">
-                            CD YAML:{" "}
-                          </span>
-                          {proj.cdWorkflowPath}
-                        </div>
-                      </Show>
-                      <Show when={proj.targetUrl}>
-                        <div class="truncate font-mono">
-                          <span class="font-semibold text-gray-700 dark:text-neutral-300">
-                            URL:{" "}
-                          </span>
-                          {proj.targetUrl}
-                        </div>
-                        <div class="flex items-center gap-1.5">
-                          <span class="font-semibold text-gray-700 dark:text-neutral-300">
-                            DNS TXT Gate:
-                          </span>
-                          <span
-                            class={`inline-flex items-center py-0.5 px-2 rounded-full text-xs font-medium ${
-                              proj.dnsVerified
-                                ? "bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400"
-                                : "bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-400"
-                            }`}
-                          >
-                            {proj.dnsVerified ? "Verified" : "Pending TXT Check"}
-                          </span>
-                        </div>
-                      </Show>
-                      <Show when={proj.binaryFileName}>
-                        <div class="truncate font-mono">
-                          <span class="font-semibold text-gray-700 dark:text-neutral-300">
-                            Artifact:{" "}
-                          </span>
-                          {proj.binaryFileName} ({proj.binaryAnalysis?.format ?? "ELF64-x86_64"})
-                        </div>
-                      </Show>
-                      <div class="pt-1 flex flex-wrap items-center gap-2">
-                        <span class="inline-flex items-center gap-x-1 py-0.5 px-2 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-400">
-                          {proj.vulnerabilities.filter((v) => v.zeroFalsePositiveConfirmed).length}{" "}
-                          Confirmed RED PoC
-                        </span>
-                        <span class="inline-flex items-center gap-x-1 py-0.5 px-2 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                          {
-                            proj.vulnerabilities.filter((v) => v.verifyGreenLog.trim().length > 0)
-                              .length
-                          }{" "}
-                          Verified GREEN
-                        </span>
-                      </div>
-                    </div>
-
-                    <div class="pt-2 border-t border-gray-100 dark:border-neutral-800 flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedId(proj.id)}
-                        class={`py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg cursor-pointer transition-colors ${
-                          isSelected()
-                            ? "bg-blue-600 text-white"
-                            : "bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400"
-                        }`}
-                      >
-                        {isSelected() ? "✓ Active Workspace Target" : "Inspect Target"}
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={runningPipeline()}
-                        onClick={() => {
-                          setSelectedId(proj.id);
-                          void handleRunScan(proj);
-                        }}
-                        class="py-1.5 px-2.5 inline-flex items-center gap-x-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-800 hover:bg-gray-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800 cursor-pointer"
-                      >
-                        ⚡ Run Loop
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            }}
-          </For>
-        </Show>
-      </div>
-
-      {/* 4B. Live 4-Stage Verification Timeline (Recon -> PoC Reproduction (RED) -> Remediation Synthesis -> Verification (GREEN)) */}
-      <Show when={selectedProject()}>
-        {(proj) => (
-          <div class="flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800">
-            <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-100">
-                  Live 4-Stage Self-Healing Verification Timeline — {proj().name}
-                </h2>
-                <p class="text-xs text-gray-500 dark:text-neutral-400">
-                  Recon → PoC Reproduction (RED) → Remediation Synthesis → Verification (GREEN)
-                </p>
-              </div>
-              <Show when={lastPipelineSummary()}>
-                {(summary) => (
-                  <span class="inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-400">
-                    {summary()}
+                  <span class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4F46E5] dark:text-[#818CF8]">
+                    Target Onboarding
                   </span>
-                )}
-              </Show>
-            </div>
+                  <h2
+                    id="new-target-modal-title"
+                    class="text-[22px] leading-[30px] font-bold tracking-[-0.02em] text-[#111827] dark:text-[#F3F4F6] mt-0.5"
+                  >
+                    Register Security Target
+                  </h2>
+                </div>
+                <PrelineButton variant="ghost" size="xs" onClick={() => setShowNewForm(false)}>
+                  Close
+                </PrelineButton>
+              </div>
 
-            <div class="p-4 md:p-5 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              <For each={proj().timeline}>
-                {(step, index) => (
-                  <div class="flex flex-col justify-between p-4 rounded-xl border border-gray-200 dark:border-neutral-800 bg-gray-50/70 dark:bg-neutral-950/60 space-y-3">
-                    <div class="space-y-2">
-                      <div class="flex items-center justify-between gap-2">
-                        <span class="text-xs font-mono font-semibold text-gray-500 dark:text-neutral-400">
-                          STAGE 0{index() + 1} • {step.stage.toUpperCase()}
-                        </span>
-                        <span
-                          class={`inline-flex items-center gap-x-1.5 py-0.5 px-2 rounded-full text-xs font-medium ${defenseBadgeClass(
-                            step.status,
-                          )}`}
-                        >
-                          {step.status}
-                        </span>
-                      </div>
-                      <h3 class="text-sm font-semibold text-gray-800 dark:text-neutral-100">
-                        {step.title}
-                      </h3>
-                      <p class="text-xs text-gray-600 dark:text-neutral-400">{step.summary}</p>
-                      <div class="flex flex-wrap items-center gap-1.5">
-                        <span class="inline-flex items-center py-0.5 px-2 rounded-full text-xs font-mono bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400">
-                          {step.modelUsed}
-                        </span>
-                        <span class="text-xs font-mono text-gray-500 dark:text-neutral-400">
-                          {step.durationMs}ms
-                        </span>
-                      </div>
-                    </div>
-
-                    <div class="p-2.5 rounded-lg bg-neutral-900 text-neutral-100 font-mono text-xs overflow-x-auto border border-neutral-800">
-                      <div class="text-neutral-300 whitespace-pre-wrap break-words">
-                        {step.commandOrLog}
-                      </div>
-                    </div>
+              <form onSubmit={handleCreateProject} class="space-y-5">
+                {/* Intake Mode Filter Chips (40px pill chips) */}
+                <div>
+                  <span class="block text-[14px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6] mb-2">
+                    Target Intake Mode
+                  </span>
+                  <div class="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      data-testid="intake-mode-github"
+                      onClick={() => setNewMode("github")}
+                      class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                        newMode() === "github"
+                          ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                          : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                      }`}
+                    >
+                      GitHub Repo
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="intake-mode-url-dns"
+                      onClick={() => setNewMode("url-dns")}
+                      class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                        newMode() === "url-dns"
+                          ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                          : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                      }`}
+                    >
+                      URL + DNS Gate
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="intake-mode-binary"
+                      onClick={() => setNewMode("binary")}
+                      class={`h-10 px-4 rounded-full text-[14px] leading-[20px] font-semibold transition-all cursor-pointer ${
+                        newMode() === "binary"
+                          ? "bg-[#EEF2FF] text-[#4F46E5] border-[1.5px] border-[#4F46E5] dark:bg-indigo-500/16 dark:text-[#818CF8] dark:border-[#818CF8]"
+                          : "bg-white text-[#4B5563] border border-[#DFE3E8] hover:bg-[#F2F4F7] dark:bg-[#17181C] dark:text-[#9CA3AF] dark:border-[#2E323C]"
+                      }`}
+                    >
+                      No-Source Binary
+                    </button>
                   </div>
-                )}
-              </For>
+                </div>
+
+                <PrelineInput
+                  label="Project / Service Identifier"
+                  data-testid="new-project-name-input"
+                  placeholder="e.g. korea-pay-webhook-edge"
+                  value={newName()}
+                  onInput={(e) => setNewName(e.currentTarget.value)}
+                  required
+                />
+
+                <Show when={newMode() === "github"}>
+                  <PrelineInput
+                    label="GitHub Repository URL"
+                    data-testid="new-project-repo-input"
+                    placeholder="https://github.com/org/repo"
+                    value={newRepoUrl()}
+                    onInput={(e) => setNewRepoUrl(e.currentTarget.value)}
+                  />
+                </Show>
+
+                <Show when={newMode() === "url-dns"}>
+                  <PrelineInput
+                    label="Target Endpoint URL"
+                    data-testid="new-project-url-input"
+                    placeholder="https://pay.korea-fintech.kr/v3/settlement/callback"
+                    value={newTargetUrl()}
+                    onInput={(e) => setNewTargetUrl(e.currentTarget.value)}
+                  />
+                </Show>
+
+                <Show when={newMode() === "binary"}>
+                  <PrelineInput
+                    label="ELF64 / PE Binary Artifact Name"
+                    data-testid="new-project-binary-input"
+                    placeholder="edge-telemetry-gateway.elf"
+                    value={newBinaryName()}
+                    onInput={(e) => setNewBinaryName(e.currentTarget.value)}
+                  />
+                </Show>
+
+                <div class="pt-2 flex items-center justify-end gap-3">
+                  <PrelineButton
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setShowNewForm(false)}
+                  >
+                    Cancel
+                  </PrelineButton>
+                  <PrelineButton
+                    type="submit"
+                    variant="primary"
+                    size="sm"
+                    data-testid="create-project-submit-btn"
+                  >
+                    Create &amp; Initialize Target
+                  </PrelineButton>
+                </div>
+              </form>
             </div>
           </div>
-        )}
-      </Show>
-
-      {/* 5. Deep Remediation & Verification Insight Panel */}
-      <Show when={selectedProject()}>
-        {(proj) => (
-          <AegisPatchInsightPanel
-            project={proj()}
-            busy={runningPipeline() || verifyingDns() || uploadingBinary()}
-            onToggleShield={(enabled) => handleToggleShield(proj(), enabled)}
-            onTestAttack={(payload) => handleTestAttack(proj(), payload)}
-            onRunScan={(mode) => handleRunScan(proj(), mode)}
-          />
-        )}
+        </Show>
       </Show>
     </div>
   );

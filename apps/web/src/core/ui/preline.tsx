@@ -1,38 +1,62 @@
-import { type JSX, Show, splitProps } from "solid-js";
+import { createUniqueId, type JSX, Show, splitProps } from "solid-js";
 
-export type PrelineBadgeVariant = "blue" | "teal" | "amber" | "red" | "purple" | "gray";
+export type PrelineBadgeVariant =
+  | "blue"
+  | "teal"
+  | "emerald"
+  | "amber"
+  | "red"
+  | "purple"
+  | "indigo"
+  | "gray"
+  | "violet"
+  | "rose";
 
-const BADGE_VARIANTS: Record<PrelineBadgeVariant, string> = {
-  blue: "bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-400",
-  teal: "bg-teal-100 text-teal-800 dark:bg-teal-800/30 dark:text-teal-500",
-  amber: "bg-amber-100 text-amber-800 dark:bg-amber-800/30 dark:text-amber-500",
-  red: "bg-red-100 text-red-800 dark:bg-red-800/30 dark:text-red-500",
-  purple: "bg-purple-100 text-purple-800 dark:bg-purple-800/30 dark:text-purple-400",
-  gray: "bg-gray-100 text-gray-800 dark:bg-white/10 dark:text-white",
+const badgeClasses: Record<PrelineBadgeVariant, string> = {
+  emerald: "bg-[#DCFCE7] text-[#15803D] border-transparent dark:bg-[#053C01] dark:text-[#B0F4B2]",
+  teal: "bg-[#DCFCE7] text-[#15803D] border-transparent dark:bg-[#053C01] dark:text-[#B0F4B2]",
+  amber: "bg-[#FEF3C7] text-[#B45309] border-transparent dark:bg-[#470E00] dark:text-[#FFDDA5]",
+  red: "bg-[#FEE2E2] text-[#B91C1C] border-transparent dark:bg-[#7F1D1D] dark:text-[#FECACA]",
+  rose: "bg-[#FEE2E2] text-[#B91C1C] border-transparent dark:bg-[#7F1D1D] dark:text-[#FECACA]",
+  blue: "bg-[#EEF2FF] text-[#4F46E5] border-transparent dark:bg-indigo-500/16 dark:text-[#818CF8]",
+  indigo:
+    "bg-[#EEF2FF] text-[#4F46E5] border-transparent dark:bg-indigo-500/16 dark:text-[#818CF8]",
+  purple:
+    "bg-[#EEF2FF] text-[#4F46E5] border-transparent dark:bg-indigo-500/16 dark:text-[#818CF8]",
+  violet:
+    "bg-[#EEF2FF] text-[#4F46E5] border-transparent dark:bg-indigo-500/16 dark:text-[#818CF8]",
+  gray: "bg-[#F2F4F7] text-[#4B5563] border-transparent dark:bg-[#212329] dark:text-[#9CA3AF]",
 };
 
-const BADGE_DOT_VARIANTS: Record<PrelineBadgeVariant, string> = {
-  blue: "bg-blue-800 dark:bg-blue-400",
-  teal: "bg-teal-800 dark:bg-teal-500",
-  amber: "bg-amber-800 dark:bg-amber-500",
-  red: "bg-red-800 dark:bg-red-500",
-  purple: "bg-purple-800 dark:bg-purple-400",
-  gray: "bg-gray-800 dark:bg-white",
+const dotClasses: Record<PrelineBadgeVariant, string> = {
+  emerald: "bg-[#15803D] dark:bg-[#B0F4B2]",
+  teal: "bg-[#15803D] dark:bg-[#B0F4B2]",
+  amber: "bg-[#B45309] dark:bg-[#FFDDA5]",
+  red: "bg-[#B91C1C] dark:bg-[#FECACA]",
+  rose: "bg-[#B91C1C] dark:bg-[#FECACA]",
+  blue: "bg-[#4F46E5] dark:bg-[#818CF8]",
+  indigo: "bg-[#4F46E5] dark:bg-[#818CF8]",
+  purple: "bg-[#4F46E5] dark:bg-[#818CF8]",
+  violet: "bg-[#4F46E5] dark:bg-[#818CF8]",
+  gray: "bg-[#4B5563] dark:bg-[#9CA3AF]",
 };
 
 export function PrelineBadge(props: {
   variant?: PrelineBadgeVariant;
   dot?: boolean;
-  children: JSX.Element;
+  pulse?: boolean;
   class?: string;
+  children: JSX.Element;
 }) {
-  const variant = () => props.variant ?? "blue";
+  const variant = () => props.variant ?? "gray";
   return (
     <span
-      class={`inline-flex items-center gap-x-1.5 py-1 px-2.5 rounded-full text-xs font-medium ${BADGE_VARIANTS[variant()]} ${props.class ?? ""}`}
+      class={`inline-flex items-center gap-1.5 py-0.5 px-2.5 rounded-full text-[13px] leading-[20px] font-semibold border tabular-nums ${badgeClasses[variant()]} ${props.class ?? ""}`}
     >
       <Show when={props.dot}>
-        <span class={`size-1.5 inline-block rounded-full ${BADGE_DOT_VARIANTS[variant()]}`} />
+        <span
+          class={`size-1.5 inline-block rounded-full ${dotClasses[variant()]} ${props.pulse ? "animate-pulse" : ""}`}
+        />
       </Show>
       {props.children}
     </span>
@@ -40,180 +64,309 @@ export function PrelineBadge(props: {
 }
 
 export function PrelineCard(props: {
-  title?: string;
-  subtitle?: string;
-  badge?: string;
-  badgeVariant?: PrelineBadgeVariant;
-  headerActions?: JSX.Element;
-  children: JSX.Element;
+  title?: JSX.Element;
+  subtitle?: JSX.Element;
+  headerRight?: JSX.Element;
+  footer?: JSX.Element;
   class?: string;
   bodyClass?: string;
+  children: JSX.Element;
 }) {
   return (
     <div
-      class={`flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 ${props.class ?? ""}`}
+      class={`flex flex-col bg-white border border-[#EAECF0] rounded-[16px] shadow-[0_1px_2px_rgba(16,24,40,0.04)] dark:bg-[#17181C] dark:border-[#252830] ${props.class ?? ""}`}
     >
-      <Show when={props.title || props.headerActions}>
-        <div class="px-4 py-3 md:px-5 md:py-4 border-b border-gray-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-2">
-          <div class="flex flex-col gap-0.5">
-            <div class="flex items-center gap-2">
-              <Show when={props.title}>
-                <h3 class="text-sm font-semibold text-gray-800 dark:text-neutral-200">
-                  {props.title}
-                </h3>
-              </Show>
-              <Show when={props.badge}>
-                {(badgeText) => (
-                  <PrelineBadge variant={props.badgeVariant ?? "blue"} dot>
-                    {badgeText()}
-                  </PrelineBadge>
-                )}
-              </Show>
-            </div>
+      <Show when={props.title || props.headerRight}>
+        <div class="px-6 py-4 border-b border-[#EAECF0] dark:border-[#252830] flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <Show when={props.title}>
+              <h3 class="text-[18px] leading-[28px] font-semibold text-[#111827] dark:text-[#F3F4F6] flex items-center gap-2">
+                {props.title}
+              </h3>
+            </Show>
             <Show when={props.subtitle}>
-              <p class="text-xs text-gray-500 dark:text-neutral-400">{props.subtitle}</p>
+              <p class="text-[13px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF] mt-0.5">
+                {props.subtitle}
+              </p>
             </Show>
           </div>
-          <Show when={props.headerActions}>
-            <div class="flex items-center gap-2">{props.headerActions}</div>
+          <Show when={props.headerRight}>
+            <div class="flex items-center gap-2 flex-wrap">{props.headerRight}</div>
           </Show>
         </div>
       </Show>
-      <div class={`p-4 md:p-5 flex-1 ${props.bodyClass ?? ""}`}>{props.children}</div>
+      <div class={props.bodyClass ?? "p-6"}>{props.children}</div>
+      <Show when={props.footer}>
+        <div class="bg-[#F8F9FA] border-t border-[#EAECF0] rounded-b-[16px] py-3 px-6 dark:bg-[#212329]/50 dark:border-[#252830]">
+          {props.footer}
+        </div>
+      </Show>
     </div>
   );
 }
 
-export type PrelineButtonVariant = "primary" | "secondary" | "soft" | "ghost" | "danger";
+export type PrelineButtonVariant =
+  | "primary"
+  | "secondary"
+  | "soft"
+  | "danger"
+  | "emerald"
+  | "amber"
+  | "ghost";
+
 export type PrelineButtonSize = "xs" | "sm" | "md";
 
-const BUTTON_VARIANTS: Record<PrelineButtonVariant, string> = {
-  primary: "border-transparent bg-blue-600 text-white hover:bg-blue-700 focus:bg-blue-700",
+const buttonVariantClasses: Record<PrelineButtonVariant, string> = {
+  primary:
+    "border-transparent bg-[#4F46E5] text-white hover:bg-[#4338CA] active:bg-[#3730A3] shadow-2xs",
   secondary:
-    "border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 dark:bg-neutral-900 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-800",
-  soft: "border-transparent bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-800/30 dark:text-blue-400 dark:hover:bg-blue-800/50",
+    "border-[#DFE3E8] bg-white text-[#111827] shadow-2xs hover:bg-[#F8F9FA] dark:bg-[#17181C] dark:border-[#2E323C] dark:text-[#F3F4F6] dark:hover:bg-[#212329]",
+  soft: "border-transparent bg-[#F2F4F7] text-[#4B5563] hover:bg-[#EAECF0] dark:bg-[#212329] dark:text-[#9CA3AF] dark:hover:bg-[#2E323C]",
+  danger:
+    "border-transparent bg-[#DC2626] text-white hover:bg-[#B91C1C] active:bg-[#991B1B] shadow-2xs",
+  emerald:
+    "border-transparent bg-[#15803D] text-white hover:bg-[#166534] active:bg-[#14532D] shadow-2xs",
+  amber:
+    "border-transparent bg-[#B45309] text-white hover:bg-[#92400E] active:bg-[#78350F] shadow-2xs",
   ghost:
-    "border-transparent text-gray-800 hover:bg-gray-100 dark:text-neutral-200 dark:hover:bg-neutral-800",
-  danger: "border-transparent bg-red-600 text-white hover:bg-red-700 focus:bg-red-700",
+    "border-transparent bg-transparent text-[#4B5563] hover:bg-[#F2F4F7] dark:text-[#9CA3AF] dark:hover:bg-[#212329]",
 };
 
-const BUTTON_SIZES: Record<PrelineButtonSize, string> = {
-  xs: "py-1.5 px-2.5 text-xs gap-x-1.5 rounded-lg",
-  sm: "py-2 px-3 text-xs gap-x-2 rounded-lg",
-  md: "py-2 px-3 text-sm gap-x-2 rounded-lg",
+const buttonSizeClasses: Record<PrelineButtonSize, string> = {
+  xs: "h-8 px-3 text-[13px] leading-[20px] rounded-[8px] gap-1.5",
+  sm: "h-10 px-4 text-[14px] leading-[20px] rounded-[12px] gap-2",
+  md: "h-10 px-4 text-[14px] leading-[20px] rounded-[12px] gap-2",
 };
 
-export function PrelineButton(props: {
-  variant?: PrelineButtonVariant;
-  size?: PrelineButtonSize;
-  type?: "button" | "submit";
-  disabled?: boolean;
-  onClick?: (e: MouseEvent) => void;
-  children: JSX.Element;
-  class?: string;
-  title?: string;
-}) {
-  const variant = () => props.variant ?? "primary";
-  const size = () => props.size ?? "md";
+export function PrelineButton(
+  props: JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
+    variant?: PrelineButtonVariant;
+    size?: PrelineButtonSize;
+  },
+) {
+  const [local, rest] = splitProps(props, ["variant", "size", "class", "children", "type"]);
+  const variant = () => local.variant ?? "secondary";
+  const size = () => local.size ?? "sm";
+
   return (
     <button
-      type={props.type ?? "button"}
-      disabled={props.disabled}
-      onClick={props.onClick}
-      title={props.title}
-      class={`inline-flex items-center justify-center font-medium border focus:outline-hidden disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-colors ${BUTTON_VARIANTS[variant()]} ${BUTTON_SIZES[size()]} ${props.class ?? ""}`}
+      type={local.type ?? "button"}
+      class={`inline-flex items-center justify-center font-semibold border focus-visible:outline-hidden focus-visible:border-[#4F46E5] dark:focus-visible:border-[#818CF8] focus-visible:shadow-[0_0_0_3px_rgba(79,70,229,0.14)] disabled:opacity-50 disabled:pointer-events-none cursor-pointer transition-all duration-150 ${buttonVariantClasses[variant()]} ${buttonSizeClasses[size()]} ${local.class ?? ""}`}
+      {...rest}
     >
-      {props.children}
+      {local.children}
     </button>
   );
 }
 
-const INPUT_BASE_CLASSES =
-  "py-2 px-3 block w-full border border-gray-200 rounded-lg text-sm focus:border-blue-500 focus:ring-blue-500 disabled:opacity-50 disabled:pointer-events-none dark:bg-neutral-900 dark:border-neutral-700 dark:text-neutral-200 dark:placeholder-neutral-500 dark:focus:ring-neutral-600";
+export function PrelineInput(
+  props: JSX.InputHTMLAttributes<HTMLInputElement> & {
+    label?: string;
+    showLabel?: boolean;
+    wrapperClass?: string;
+  },
+) {
+  const [local, rest] = splitProps(props, [
+    "class",
+    "label",
+    "showLabel",
+    "wrapperClass",
+    "id",
+    "aria-label",
+    "placeholder",
+  ]);
+  const fallbackId = createUniqueId();
+  const inputId = () => local.id ?? fallbackId;
+  const ariaLabel = () =>
+    local["aria-label"] ??
+    local.label ??
+    (typeof local.placeholder === "string" ? local.placeholder : undefined) ??
+    "Text input";
+  const shouldRenderLabel = () => Boolean(local.label) && local.showLabel !== false;
 
-export function PrelineInput(props: JSX.InputHTMLAttributes<HTMLInputElement>) {
-  const [local, rest] = splitProps(props, ["class"]);
-  return <input class={`${INPUT_BASE_CLASSES} ${local.class ?? ""}`} {...rest} />;
-}
+  const control = (
+    <input
+      id={inputId()}
+      aria-label={ariaLabel()}
+      placeholder={local.placeholder}
+      class={`h-10 px-3 block w-full bg-white border border-[#DFE3E8] rounded-[8px] text-[14px] leading-[20px] text-[#111827] placeholder-[#9CA3AF] focus:border-[#4F46E5] focus:shadow-[0_0_0_3px_rgba(79,70,229,0.14)] focus:outline-hidden disabled:opacity-50 disabled:pointer-events-none dark:bg-[#17181C] dark:border-[#2E323C] dark:text-[#F3F4F6] dark:placeholder-[#9CA3AF] dark:focus:border-[#818CF8] transition-all duration-150 ${local.class ?? ""}`}
+      {...rest}
+    />
+  );
 
-export function PrelineSelect(props: JSX.SelectHTMLAttributes<HTMLSelectElement>) {
-  const [local, rest] = splitProps(props, ["class", "children"]);
   return (
-    <select class={`${INPUT_BASE_CLASSES} ${local.class ?? ""}`} {...rest}>
-      {local.children}
-    </select>
+    <Show when={shouldRenderLabel()} fallback={control}>
+      <div class={local.wrapperClass ?? "w-full"}>
+        <label
+          for={inputId()}
+          class="block text-[14px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6] mb-2"
+        >
+          {local.label}
+        </label>
+        {control}
+      </div>
+    </Show>
   );
 }
 
-export function PrelineTextarea(props: JSX.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  const [local, rest] = splitProps(props, ["class"]);
-  return <textarea class={`${INPUT_BASE_CLASSES} ${local.class ?? ""}`} {...rest} />;
+export function PrelineSelect(
+  props: JSX.SelectHTMLAttributes<HTMLSelectElement> & {
+    label?: string;
+    showLabel?: boolean;
+    wrapperClass?: string;
+  },
+) {
+  const [local, rest] = splitProps(props, [
+    "class",
+    "children",
+    "label",
+    "showLabel",
+    "wrapperClass",
+    "id",
+    "aria-label",
+  ]);
+  const fallbackId = createUniqueId();
+  const selectId = () => local.id ?? fallbackId;
+  const ariaLabel = () => local["aria-label"] ?? local.label ?? "Select option";
+  const shouldRenderLabel = () => Boolean(local.label) && local.showLabel !== false;
+
+  const control = (
+    <select
+      id={selectId()}
+      aria-label={ariaLabel()}
+      class={`h-10 px-3 pe-9 block w-full bg-white border border-[#DFE3E8] rounded-[8px] text-[14px] leading-[20px] text-[#111827] focus:border-[#4F46E5] focus:shadow-[0_0_0_3px_rgba(79,70,229,0.14)] focus:outline-hidden disabled:opacity-50 disabled:pointer-events-none dark:bg-[#17181C] dark:border-[#2E323C] dark:text-[#F3F4F6] dark:focus:border-[#818CF8] cursor-pointer transition-all duration-150 ${local.class ?? ""}`}
+      {...rest}
+    >
+      {local.children}
+    </select>
+  );
+
+  return (
+    <Show when={shouldRenderLabel()} fallback={control}>
+      <div class={local.wrapperClass ?? "w-full"}>
+        <label
+          for={selectId()}
+          class="block text-[14px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6] mb-2"
+        >
+          {local.label}
+        </label>
+        {control}
+      </div>
+    </Show>
+  );
+}
+
+export function PrelineTextarea(
+  props: JSX.TextareaHTMLAttributes<HTMLTextAreaElement> & {
+    label?: string;
+    showLabel?: boolean;
+    wrapperClass?: string;
+  },
+) {
+  const [local, rest] = splitProps(props, [
+    "class",
+    "label",
+    "showLabel",
+    "wrapperClass",
+    "id",
+    "aria-label",
+    "placeholder",
+  ]);
+  const fallbackId = createUniqueId();
+  const textareaId = () => local.id ?? fallbackId;
+  const ariaLabel = () =>
+    local["aria-label"] ??
+    local.label ??
+    (typeof local.placeholder === "string" ? local.placeholder : undefined) ??
+    "Text area";
+  const shouldRenderLabel = () => Boolean(local.label) && local.showLabel !== false;
+
+  const control = (
+    <textarea
+      id={textareaId()}
+      aria-label={ariaLabel()}
+      placeholder={local.placeholder}
+      class={`py-2.5 px-3 block w-full bg-white border border-[#DFE3E8] rounded-[8px] text-[14px] leading-[20px] text-[#111827] placeholder-[#9CA3AF] focus:border-[#4F46E5] focus:shadow-[0_0_0_3px_rgba(79,70,229,0.14)] focus:outline-hidden disabled:opacity-50 disabled:pointer-events-none dark:bg-[#17181C] dark:border-[#2E323C] dark:text-[#F3F4F6] dark:placeholder-[#9CA3AF] dark:focus:border-[#818CF8] transition-all duration-150 ${local.class ?? ""}`}
+      {...rest}
+    />
+  );
+
+  return (
+    <Show when={shouldRenderLabel()} fallback={control}>
+      <div class={local.wrapperClass ?? "w-full"}>
+        <label
+          for={textareaId()}
+          class="block text-[14px] leading-[20px] font-semibold text-[#111827] dark:text-[#F3F4F6] mb-2"
+        >
+          {local.label}
+        </label>
+        {control}
+      </div>
+    </Show>
+  );
 }
 
 export function PrelineStatCard(props: {
   label: string;
-  value: string | number;
-  hint?: string;
-  badge?: string;
-  badgeVariant?: PrelineBadgeVariant;
-  class?: string;
+  value: JSX.Element;
+  badge?: JSX.Element;
+  subtext?: JSX.Element;
+  icon?: JSX.Element;
 }) {
   return (
-    <div
-      class={`flex flex-col bg-white border border-gray-200 shadow-2xs rounded-xl dark:bg-neutral-900 dark:border-neutral-800 p-4 md:p-5 ${props.class ?? ""}`}
-    >
-      <div class="flex items-center justify-between gap-x-2">
-        <p class="text-xs uppercase tracking-wide font-medium text-gray-500 dark:text-neutral-400">
-          {props.label}
-        </p>
-        <Show when={props.badge}>
-          {(badgeText) => (
-            <PrelineBadge variant={props.badgeVariant ?? "teal"} dot>
-              {badgeText()}
-            </PrelineBadge>
-          )}
+    <div class="flex flex-col bg-white border border-[#EAECF0] rounded-[16px] shadow-[0_1px_2px_rgba(16,24,40,0.04)] dark:bg-[#17181C] dark:border-[#252830]">
+      <div class="p-6 flex gap-x-4 items-start justify-between">
+        <div class="grow">
+          <div class="flex items-center gap-x-2">
+            <p class="text-[12px] leading-[16px] font-semibold uppercase tracking-[0.04em] text-[#4B5563] dark:text-[#9CA3AF]">
+              {props.label}
+            </p>
+          </div>
+          <div class="mt-2 flex items-baseline gap-x-2">
+            <h3 class="text-xl sm:text-2xl font-bold text-[#111827] dark:text-[#F3F4F6] tracking-[-0.02em] tabular-nums">
+              {props.value}
+            </h3>
+            <Show when={props.badge}>{props.badge}</Show>
+          </div>
+          <Show when={props.subtext}>
+            <p class="mt-1.5 text-[13px] leading-[20px] text-[#4B5563] dark:text-[#9CA3AF]">
+              {props.subtext}
+            </p>
+          </Show>
+        </div>
+        <Show when={props.icon}>
+          <div class="shrink-0 flex justify-center items-center size-10 bg-[#EEF2FF] text-[#4F46E5] rounded-[12px] dark:bg-indigo-500/16 dark:text-[#818CF8]">
+            {props.icon}
+          </div>
         </Show>
       </div>
-      <div class="mt-1 flex items-baseline gap-x-2">
-        <h3 class="text-xl sm:text-2xl font-semibold text-gray-800 dark:text-neutral-200">
-          {props.value}
-        </h3>
-      </div>
-      <Show when={props.hint}>
-        <p class="mt-1 text-xs text-gray-500 dark:text-neutral-500">{props.hint}</p>
-      </Show>
     </div>
   );
 }
 
-export type PrelineAlertVariant = "info" | "success" | "warning" | "danger";
-
-const ALERT_VARIANTS: Record<PrelineAlertVariant, string> = {
-  info: "bg-blue-50 border-blue-200 text-blue-800 dark:bg-blue-800/10 dark:border-blue-900 dark:text-blue-400",
-  success:
-    "bg-teal-50 border-teal-200 text-teal-800 dark:bg-teal-800/10 dark:border-teal-900 dark:text-teal-500",
-  warning:
-    "bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-800/10 dark:border-amber-900 dark:text-amber-500",
-  danger:
-    "bg-red-50 border-red-200 text-red-800 dark:bg-red-800/10 dark:border-red-900 dark:text-red-500",
-};
-
 export function PrelineAlert(props: {
-  variant?: PrelineAlertVariant;
-  title?: string;
+  variant?: "blue" | "teal" | "amber" | "red";
+  title?: JSX.Element;
   children: JSX.Element;
   class?: string;
 }) {
-  const variant = () => props.variant ?? "info";
+  const styles = {
+    blue: "bg-[#EEF2FF] border-[#4F46E5]/20 text-[#4F46E5] dark:bg-indigo-500/16 dark:border-[#818CF8]/30 dark:text-[#818CF8]",
+    teal: "bg-[#DCFCE7] border-[#15803D]/20 text-[#15803D] dark:bg-[#053C01] dark:border-[#B0F4B2]/25 dark:text-[#B0F4B2]",
+    amber:
+      "bg-[#FEF3C7] border-[#B45309]/20 text-[#B45309] dark:bg-[#470E00] dark:border-[#FFDDA5]/25 dark:text-[#FFDDA5]",
+    red: "bg-[#FEE2E2] border-[#B91C1C]/20 text-[#B91C1C] dark:bg-[#7F1D1D] dark:border-[#FECACA]/25 dark:text-[#FECACA]",
+  };
+  const variant = () => props.variant ?? "blue";
   return (
     <div
+      class={`rounded-[12px] p-4 border text-[14px] leading-[22px] ${styles[variant()]} ${props.class ?? ""}`}
       role="alert"
-      class={`border text-sm rounded-lg p-4 ${ALERT_VARIANTS[variant()]} ${props.class ?? ""}`}
     >
       <Show when={props.title}>
         <h4 class="font-semibold mb-1">{props.title}</h4>
       </Show>
-      <div>{props.children}</div>
+      <div class="text-[13px] leading-[20px] opacity-95">{props.children}</div>
     </div>
   );
 }

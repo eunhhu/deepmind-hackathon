@@ -1,14 +1,38 @@
 @import "tailwindcss";
 @import "preline/variants.css";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   :root {
+    color-scheme: light;
+  }
+
+  .dark {
     color-scheme: dark;
   }
 
   body {
     font-family:
-      "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont,
+      "Inter", "Segoe UI", Roboto, sans-serif;
+    background-color: #F8F9FA;
+    color: #111827;
+  }
+
+  .dark body {
+    background-color: #111214;
+    color: #F3F4F6;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  [role="status"],
+  [role="alert"] {
+    word-break: keep-all;
+    overflow-wrap: break-word;
   }
 
   code,
@@ -16,5 +40,13 @@
   .font-mono {
     font-family:
       "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, monospace;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
   }
 }

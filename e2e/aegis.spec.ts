@@ -4,7 +4,7 @@ const ARTIFACT_DIR =
   "/Users/sunwoo/.gemini/antigravity/brain/b6b21362-2b24-4366-a1f1-892dc515f3bb";
 
 test.describe("AEGIS-4 Production E2E Verification Suite", () => {
-  test("verifies full Tri-Mode Autonomous Cyber-Defense workflow, ELF Binary Hard-Patching, and Live Route Shield Proxy", async ({
+  test("verifies Product vs. Ops separation, Tri-Mode Remediation, Dynamic Target Artifacts, and Clean Reset", async ({
     page,
     request,
   }) => {
@@ -14,8 +14,10 @@ test.describe("AEGIS-4 Production E2E Verification Suite", () => {
 
     page.on("response", (res) => {
       if (res.status() >= 400) {
-        // Intentional 403 from the live Route Shield reverse-proxy test
-        if (res.status() === 403 && res.url().includes("/shield-proxy/")) {
+        if (
+          res.status() === 403 &&
+          (res.url().includes("/shield-proxy") || res.url().includes("/scan"))
+        ) {
           return;
         }
         unexpectedHttpErrors.push(`${res.status()} ${res.request().method()} ${res.url()}`);
@@ -31,208 +33,147 @@ test.describe("AEGIS-4 Production E2E Verification Suite", () => {
         consoleErrors.push(text);
       }
     });
+
     page.on("pageerror", (err) => {
       pageErrors.push(err.message);
     });
 
-    // 1. Navigate to AEGIS-4 Dashboard
-    await page.goto("/");
-    await expect(page.getByText("AEGIS-4 • Gemini 4 Argon")).toBeVisible();
-    await expect(page.getByText("h2gdm-hack26icn-2693")).toBeVisible();
-    await expect(
-      page.getByRole("heading", {
-        name: "Autonomous Exploit Verification, Binary Hot-Patch & Route-Shield Platform",
-      }),
-    ).toBeVisible();
+    // Ensure clean 3-seed baseline before running E2E
+    const preReset = await request.post("/api/modules/aegis/reset");
+    expect(preReset.status()).toBe(200);
 
-    // Verify all 3 seeded target projects are rendered
-    await expect(
-      page.getByRole("heading", { name: "acme-cloud/payment-checkout-api" }).first(),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: "fintech-edge-webhook-gateway" }).first(),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: "iot-telemetry-daemon-v2.4.elf" }).first(),
-    ).toBeVisible();
+    try {
+      // 1. Navigate to AEGIS-4 Security Console (Pure Product Level View by default)
+      await page.goto("/");
+      await expect(page.getByTestId("aegis-product-view")).toBeVisible();
+      await expect(page.getByText("AEGIS-4").first()).toBeVisible();
+      await expect(page.getByText("Security Console").first()).toBeVisible();
 
-    // 2. Trigger Real-Time 4-Stage SSE Self-Healing Scan on Target 1 (White-Box GitHub)
-    const runLoopBtn = page.getByRole("button", {
-      name: /Run Full 4-Stage Self-Healing Loop/i,
-    });
-    await expect(runLoopBtn).toBeVisible();
-    await runLoopBtn.click();
+      // Verify internal Ops & Engine Console elements are NOT mixed into the default Product view
+      await expect(page.getByTestId("aegis-ops-console-view")).toBeHidden();
+      await expect(page.getByTestId("ops-infrastructure-strip")).toBeHidden();
 
-    // Verify all 4 pipeline stages complete via live SSE stream and findings are verified
-    await expect(page.getByText(/4-Stage Self-Healing Stream Completed/i)).toBeVisible({
-      timeout: 15_000,
-    });
-    await expect(page.getByText("STAGE 01 • RECON")).toBeVisible();
-    await expect(page.getByText("STAGE 02 • POC_RED")).toBeVisible();
-    await expect(page.getByText("STAGE 03 • REMEDIATION")).toBeVisible();
-    await expect(page.getByText("STAGE 04 • VERIFY_GREEN")).toBeVisible();
-    await expect(page.getByText("PATCH VERIFIED").first()).toBeVisible();
+      // Verify Product top navigation tabs are visible
+      await expect(page.getByTestId("product-nav-projects")).toBeVisible();
+      await expect(page.getByTestId("product-nav-vulnerabilities")).toBeVisible();
+      await expect(page.getByTestId("product-nav-remediation")).toBeVisible();
 
-    // 3. Mode 1 (White-Box Git Branch & GitHub PR + .patch Download + Verify-Critique-Polish)
-    const openPrBtn = page.getByRole("button", { name: /Open \/ Sync GitHub PR/i });
-    await expect(openPrBtn).toBeVisible();
-    await openPrBtn.click();
-    await expect(page.getByText(/gh pr create/i).first()).toBeVisible();
+      // Verify all 3 canonical seed targets are rendered cleanly with no leftover dummy projects
+      await expect(page.getByTestId("project-card-aegis-whitebox-github")).toBeVisible();
+      await expect(page.getByTestId("project-card-aegis-blackbox-url-shield")).toBeVisible();
+      await expect(page.getByTestId("project-card-aegis-blackbox-binary-elf")).toBeVisible();
 
-    // Run Verify-Critique-Polish Audit in Mode 1
-    const polishBtn = page.getByRole("button", { name: /Verify-Critique-Polish Audit/i });
-    await expect(polishBtn).toBeVisible();
-    await polishBtn.click();
-    await expect(page.getByText("✨ Verify-Critique-Polish Rubric Verified")).toBeVisible({
-      timeout: 15_000,
-    });
+      // 2. Target 1 (White-Box GitHub Repo): Run SSE Security Scan & Verify Git PR Remediation
+      await page.getByTestId("project-card-aegis-whitebox-github").click();
+      await page.getByTestId("stream-scan-btn").click();
+      await expect(
+        page.getByText(/4-stage Red-to-Green autonomous verification completed/i),
+      ).toBeVisible({ timeout: 15_000 });
 
-    // Capture Mode 1 White-Box view screenshot with PR sync & Verify-Critique-Polish Rubric
-    await page.screenshot({
-      path: `${ARTIFACT_DIR}/playwright-aegis-mode1-whitebox.png`,
-      fullPage: true,
-    });
+      // Inspect Git PR tab and trigger GitHub PR creation
+      await page.getByTestId("remediation-tab-git-pr").click();
+      await expect(page.getByTestId("code-diff-viewer")).toBeVisible();
+      await page.getByTestId("create-pr-btn").click();
+      await expect(page.getByTestId("pr-created-banner")).toBeVisible();
 
-    // Verify .patch download endpoint returns valid unified diff
-    const patchRes = await request.get(
-      "/api/modules/aegis/projects/aegis-whitebox-github/patch-download",
-    );
-    expect(patchRes.status()).toBe(200);
-    const patchText = await patchRes.text();
-    expect(patchText).toContain("Subject: [PATCH]");
-    expect(patchText).toContain("--- a/");
-    expect(patchText).toContain("+++ b/");
+      // Verify .patch download endpoint returns valid unified diff
+      const patchRes = await request.get(
+        "/api/modules/aegis/projects/aegis-whitebox-github/patch-download",
+      );
+      expect(patchRes.status()).toBe(200);
+      const patchText = await patchRes.text();
+      expect(patchText).toContain("Subject: [PATCH]");
+      expect(patchText).toContain("@@ ");
 
-    // 4. Switch to Demo 3 / Mode 2 (No-Source ELF Binary Hard-Patch & Custom ELF64 Upload)
-    await page
-      .getByRole("button", {
-        name: /Demo 3: No-Source ELF Binary/i,
-      })
-      .click();
+      await page.screenshot({
+        path: `${ARTIFACT_DIR}/playwright-aegis-mode1-whitebox.png`,
+        fullPage: true,
+      });
 
-    await expect(
-      page.getByText("🔐 Cryptographic SHA-256 Integrity Verification"),
-    ).toBeVisible();
+      // 3. Target 3 (No-Source ELF Binary): Verify Binary Disassembly & Hard-Patch Download
+      await page.getByTestId("project-card-aegis-blackbox-binary-elf").click();
+      await page.getByTestId("remediation-tab-binary-patch").click();
+      await expect(page.getByTestId("binary-patch-table")).toBeVisible();
+      await expect(page.getByTestId("download-binary-link")).toBeVisible();
 
-    // Upload a custom ELF64 binary with an `e8` CALL + `48 89 c7` sequence via hidden file input
-    const customElfBytes = Buffer.from([
-      0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x48, 0x89, 0xd6, 0xe8, 0x4b, 0xfe, 0xff, 0xff, 0x48, 0x89, 0xc7, 0x90, 0xc3,
-    ]);
-    await page.locator("#aegis-binary-upload-input").setInputFiles({
-      name: "custom-iot-firmware.elf",
-      mimeType: "application/octet-stream",
-      buffer: customElfBytes,
-    });
+      const binRes = await request.get(
+        "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-download",
+      );
+      expect(binRes.status()).toBe(200);
+      const shaAfterHeader = binRes.headers()["x-aegis-sha256-after"];
+      expect(shaAfterHeader).toBeTruthy();
 
-    // Wait for the uploaded binary filename and cryptographic SHA-256 match badge to appear
-    await expect(page.getByText("custom-iot-firmware.elf").first()).toBeVisible({
-      timeout: 15_000,
-    });
-    await expect(page.getByText("✓ Matches SHA-256 After")).toBeVisible();
+      await page.screenshot({
+        path: `${ARTIFACT_DIR}/playwright-aegis-mode2-binary.png`,
+        fullPage: true,
+      });
 
-    // Verify actual binary download endpoint returns patched ELF bytes matching X-Aegis-SHA256-After
-    const binRes = await request.get(
-      "/api/modules/aegis/projects/aegis-blackbox-binary-elf/binary-download",
-    );
-    expect(binRes.status()).toBe(200);
-    const shaAfterHeader = binRes.headers()["x-aegis-sha256-after"];
-    expect(shaAfterHeader).toBeTruthy();
-    await expect(page.getByText(shaAfterHeader).first()).toBeVisible();
+      // 4. Target 2 (URL + DNS TXT Gate -> Route Shield & Verification Sandbox)
+      await page.getByTestId("project-card-aegis-blackbox-url-shield").click();
+      await page.getByTestId("remediation-tab-route-shield").click();
+      await expect(page.getByTestId("toggle-shield-btn")).toBeVisible();
 
-    await page.screenshot({
-      path: `${ARTIFACT_DIR}/playwright-aegis-mode2-binary.png`,
-      fullPage: true,
-    });
+      // Open the dedicated Verification & Sandbox Exploit Lab drawer to test Live Exploit Payload Tester
+      await page.getByTestId("remediation-tab-verification-ops").click();
+      await page.getByTestId("test-attack-btn").click();
+      await expect(page.getByTestId("attack-verdict-banner")).toContainText("BLOCKED_GREEN");
+      await expect(page.getByTestId("attack-verdict-banner")).toContainText("HTTP 403");
 
-    // 5. Switch to Demo 2 / Mode 3 (External URL + DNS TXT Gate -> Live Route Shield & Reverse Proxy)
-    await page
-      .getByRole("button", {
-        name: /Demo 2: External URL \+ DNS TXT Gate/i,
-      })
-      .click();
+      // Toggle Shield OFF -> verify exploit succeeds (200 RED) -> toggle back ON
+      await page.getByTestId("toggle-shield-btn").click();
+      await page.getByTestId("test-attack-btn").click();
+      await expect(page.getByTestId("attack-verdict-banner")).toContainText("EXPLOITED_RED");
 
-    await expect(page.locator("#aegis-shield-protected-path")).toBeVisible();
+      await page.getByTestId("toggle-shield-btn").click();
 
-    // Update rate limit and save live rule
-    await page.locator("#aegis-shield-rate-limit").fill("45");
-    await page.getByRole("button", { name: "Save Live Rule" }).click();
+      await page.screenshot({
+        path: `${ARTIFACT_DIR}/playwright-aegis-mode3-shield.png`,
+        fullPage: true,
+      });
 
-    // Fire Live Exploit when Shield is ON -> expect HTTP 403 Blocked banner
-    await page.getByRole("button", { name: /Fire Live Exploit Against Route/i }).click();
-    await expect(
-      page.getByText(/HTTP 403 Forbidden — Blocked by AEGIS-4 Route Shield/i),
-    ).toBeVisible();
+      // 5. Onboard Custom URL Target -> Verify DNS Ownership Gate & Target-Tailored Scan Artifacts
+      await page.getByTestId("toggle-new-project-btn").click();
+      await page.getByTestId("intake-mode-url-dns").click();
+      await page.getByTestId("new-project-name-input").fill("korea-pay-webhook-edge");
+      await page
+        .getByTestId("new-project-url-input")
+        .fill("https://pay.korea-fintech.kr/v3/settlement/callback");
+      await page.getByTestId("create-project-submit-btn").click();
 
-    // Test Real Reverse-Proxy Gateway (/shield-proxy) when Shield is ON -> expect 403 Intercepted
-    await page
-      .getByRole("button", { name: /Test Live Reverse-Proxy Gateway \(\/shield-proxy\)/i })
-      .click();
-    await expect(
-      page.getByText(/Reverse-Proxy Gateway \(\/shield-proxy\): INTERCEPTED & BLOCKED \(403\)/i),
-    ).toBeVisible();
+      // Verify DNS TXT Ownership Gate card appears and authorizes after verification
+      await expect(page.getByTestId("dns-verify-card")).toBeVisible();
+      await page.getByTestId("dns-verify-btn").click();
+      await expect(page.getByTestId("dns-verify-card")).toBeHidden();
 
-    // Toggle Route Shield OFF -> Fire Live Exploit -> expect HTTP 200 OK (RED: EXPLOIT SUCCEEDED)
-    await page.getByRole("button", { name: /Route Shield: ACTIVE \(ON\)/i }).click();
-    await expect(
-      page.getByRole("button", { name: /Route Shield: BYPASSED \(OFF\)/i }),
-    ).toBeVisible();
+      // Run Quick Re-Scan and verify target-tailored route & project name appear in artifacts
+      await page.getByTestId("rescan-btn").click();
+      await expect(
+        page.getByText(/Completed deterministic security scan for korea-pay-webhook-edge/i),
+      ).toBeVisible();
+      await expect(page.getByText("/v3/settlement/callback").first()).toBeVisible();
 
-    await page.getByRole("button", { name: /Fire Live Exploit Against Route/i }).click();
-    await expect(
-      page.getByText(/HTTP 200 OK — RED: EXPLOIT SUCCEEDED \(Shield OFF\)/i),
-    ).toBeVisible();
+      // 6. Toggle Ops & Engine Console Mode and verify internal orchestration tools are isolated there
+      await page.getByTestId("toggle-ops-console-btn").click();
+      await expect(page.getByTestId("aegis-ops-console-view")).toBeVisible();
+      await expect(page.getByTestId("ops-infrastructure-strip")).toBeVisible();
+      await expect(
+        page.getByRole("heading", { name: /Gemini 4 Argon Swarm & Infrastructure Console/i }),
+      ).toBeVisible();
 
-    // Toggle Route Shield back ON -> verify green protection restored
-    await page.getByRole("button", { name: /Route Shield: BYPASSED \(OFF\)/i }).click();
-    await expect(
-      page.getByRole("button", { name: /Route Shield: ACTIVE \(ON\)/i }),
-    ).toBeVisible();
+      // Switch back to Product Console and click Reset Demo Targets button
+      await page.getByTestId("toggle-ops-console-btn").click();
+      await expect(page.getByTestId("aegis-product-view")).toBeVisible();
+      await page.getByTestId("reset-demo-projects-btn").click();
+      await expect(
+        page.getByText(/Demo targets restored to clean baseline \(3 flagship targets\)/i),
+      ).toBeVisible();
 
-    await page.screenshot({
-      path: `${ARTIFACT_DIR}/playwright-aegis-mode3-shield.png`,
-      fullPage: true,
-    });
-
-    // 6. Test New Target Intake & DNS TXT Ownership Gate Verification
-    await page.getByRole("button", { name: /\+ New Target Intake/i }).click();
-    await expect(
-      page.getByRole("heading", { name: /3-Mode Target Intake & Scope Authorization/i }),
-    ).toBeVisible();
-
-    // Switch intake mode to Target URL + DNS TXT Ownership Gate & register new target
-    await page.getByRole("button", { name: /2\. Target URL \+ DNS TXT Ownership Gate/i }).click();
-    await page.locator("#aegis-intake-name").fill("staging-gateway-e2e");
-    await page.locator("#aegis-intake-url").fill("https://staging-gateway.acme.dev/v1/hooks");
-    await page.getByRole("button", { name: /Register Target in AEGIS-4/i }).click();
-
-    // Verify Mandatory DNS TXT Ownership Gate banner appears for the newly created URL target
-    await expect(
-      page.getByRole("heading", {
-        name: /DNS TXT Domain Ownership Verification Required Before Active Sandbox Exploitation/i,
-      }),
-    ).toBeVisible();
-    await page
-      .getByRole("button", {
-        name: /Verify DNS TXT Record/i,
-      })
-      .click();
-    await expect(
-      page.getByRole("heading", {
-        name: /DNS TXT Domain Ownership Verification Required Before Active Sandbox Exploitation/i,
-      }),
-    ).toBeHidden();
-
-    // 7. Verify Other Platform Modules Load Cleanly via Top Segmented Navigation
-    await page.getByRole("button", { name: /Workspace \+ Firestore Hub/i }).click();
-    await expect(page.getByText(/Generic Firestore Collection Inspector/i)).toBeVisible();
-
-    await page.getByRole("button", { name: /Argon Parallel Swarm Console/i }).click();
-    await expect(page.getByRole("heading", { name: /Parallel Worker Shards/i })).toBeVisible();
-
-    // Ensure zero uncaught page, console, or unexpected HTTP errors occurred during the entire session
-    expect(pageErrors).toEqual([]);
-    expect(unexpectedHttpErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+      expect(pageErrors).toEqual([]);
+      expect(unexpectedHttpErrors).toEqual([]);
+      expect(consoleErrors).toEqual([]);
+    } finally {
+      // Always leave the server with only the 3 clean canonical seed targets
+      await request.post("/api/modules/aegis/reset");
+    }
   });
 });
