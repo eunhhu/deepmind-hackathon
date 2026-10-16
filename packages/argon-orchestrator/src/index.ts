@@ -102,9 +102,18 @@ function sleep(ms: number): Promise<void> {
 
 export class ArgonParallelOrchestrator {
   private readonly client: GoogleGenAI;
+  public readonly hasApiKey: boolean;
 
   constructor(apiKey?: string) {
-    this.client = new GoogleGenAI(apiKey ? { apiKey } : {});
+    const resolvedKey =
+      apiKey ??
+      (typeof process !== "undefined"
+        ? process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+        : undefined);
+    this.hasApiKey = Boolean(resolvedKey && resolvedKey.trim().length > 0);
+    this.client = new GoogleGenAI({
+      apiKey: this.hasApiKey ? resolvedKey : "dry-run-placeholder-key",
+    });
   }
 
   /**
@@ -246,3 +255,6 @@ export class ArgonParallelOrchestrator {
     };
   }
 }
+
+export * from "./registry";
+export * from "./units";

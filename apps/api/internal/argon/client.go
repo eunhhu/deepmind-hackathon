@@ -347,6 +347,27 @@ func (c *Client) ExecuteTask(
 	}
 }
 
+// RunTask executes a single ParallelTaskInput against Gemini 4 Argon (defaulting to ThinkingLow if unspecified).
+func (c *Client) RunTask(
+	ctx context.Context,
+	task ParallelTaskInput,
+	systemInstruction string,
+	dryRun bool,
+) ParallelTaskResult {
+	thinking := task.ThinkingLevel
+	if thinking == "" {
+		thinking = ThinkingLow
+	}
+	task.ThinkingLevel = thinking
+	req := ParallelSwarmRequest{
+		SystemInstruction:    systemInstruction,
+		Model:                DefaultModel,
+		DefaultThinkingLevel: thinking,
+		Tasks:                []ParallelTaskInput{task},
+	}
+	return c.ExecuteTask(ctx, req, task, 0, "", dryRun)
+}
+
 // RunSwarm executes all tasks in ParallelSwarmRequest concurrently across bounded worker goroutines.
 // If onTaskComplete is non-nil, it is invoked safely each time a worker goroutine completes a task.
 func (c *Client) RunSwarm(

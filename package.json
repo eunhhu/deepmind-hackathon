@@ -10,7 +10,10 @@
     "dev:api": "cd apps/api && go run ./cmd/server",
     "check": "bunx @biomejs/biome check .",
     "format": "bunx @biomejs/biome format --write .",
-    "typecheck": "bun --filter '*' typecheck"
+    "typecheck": "bun --filter '*' typecheck",
+    "test": "bun --filter '*' test",
+    "test:api": "cd apps/api && go test -v -race ./...",
+    "test:all": "bun --filter '*' test && cd apps/api && go test -race ./..."
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",

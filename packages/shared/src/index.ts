@@ -1,8 +1,8 @@
 /**
  * Shared Zero-Overhead Contracts between:
- * - `apps/api` (Go 1.27 + Gin + Goroutine Gemini 4 Argon Engine)
- * - `packages/argon-orchestrator` (Bun + TS `@google/genai` Parallel Engine)
- * - `apps/web` (SolidJS Zero-VDOM Reactive UI)
+ * - `apps/api` (Go 1.27 + Gin + Goroutine Gemini 4 Argon Engine + Firebase Auth + Firestore Store)
+ * - `packages/argon-orchestrator` (Bun + TS `@google/genai` Parallel Engine & Modular Agent Units)
+ * - `apps/web` (SolidJS Zero-VDOM Reactive UI + Plug-and-Play Feature Module Registry)
  */
 
 export type ArgonThinkingLevel = "low" | "medium" | "high";
@@ -78,4 +78,144 @@ export interface ParallelSwarmResponse {
   rootInteractionId?: string;
   totalDurationMs: number;
   results: ParallelTaskResult[];
+}
+
+// ============================================================================
+// 1. Firebase / Identity Platform Auth Contracts
+// ============================================================================
+
+export interface FirebaseClientConfig {
+  projectId: string;
+  apiKey: string;
+  authDomain: string;
+}
+
+/**
+ * Pre-provisioned GCP Identity Platform + Cloud Firestore Native configuration
+ * for the `h2gdm-hack26icn-2693` project (`asia-northeast3`).
+ */
+export const DEFAULT_FIREBASE_CONFIG: FirebaseClientConfig = {
+  projectId: "h2gdm-hack26icn-2693",
+  apiKey: "AIzaSyDWI2e6DvGGycnWS0swngY4ghGlFPy_GhU",
+  authDomain: "h2gdm-hack26icn-2693.firebaseapp.com",
+};
+
+export type AuthProviderType = "anonymous" | "password" | "google" | "demo";
+
+export interface AuthUser {
+  uid: string;
+  email?: string;
+  displayName?: string;
+  provider: AuthProviderType;
+  isAnonymous: boolean;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  idToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+}
+
+export interface AuthVerifyResponse {
+  authenticated: boolean;
+  user: AuthUser;
+  projectId: string;
+  storeBackend: "firestore" | "memory";
+}
+
+// ============================================================================
+// 2. Cloud Firestore + In-Memory Dual Store Entity Contracts
+// ============================================================================
+
+export type StoreBackendType = "firestore" | "memory";
+
+export interface EntityRecord<T = Record<string, unknown>> {
+  id: string;
+  collection: string;
+  ownerUid: string;
+  data: T;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateEntityRequest<T = Record<string, unknown>> {
+  id?: string;
+  data: T;
+}
+
+export interface UpdateEntityRequest<T = Record<string, unknown>> {
+  data: Partial<T>;
+}
+
+export interface ListEntitiesResponse<T = Record<string, unknown>> {
+  collection: string;
+  backend: StoreBackendType;
+  items: EntityRecord<T>[];
+}
+
+// ============================================================================
+// 3. Modular Hackathon Feature Unit & Agent Pipeline Contracts
+// ============================================================================
+
+export interface FeatureModuleMeta {
+  id: string;
+  title: string;
+  subtitle: string;
+  badge: string;
+  apiPrefix: string;
+  collections: string[];
+  agentUnitIds: string[];
+}
+
+export interface AgentUnitInput<TPayload = Record<string, unknown>> {
+  unitId: string;
+  payload: TPayload;
+  sharedContext?: string;
+  previousInteractionId?: string;
+  thinkingLevel?: ArgonThinkingLevel;
+  maxOutputTokens?: number;
+  useManagedAgent?: boolean;
+}
+
+export interface AgentUnitResult<TOutput = Record<string, unknown>> {
+  unitId: string;
+  interactionId: string;
+  status: InteractionStatus;
+  rawText: string;
+  structuredOutput?: TOutput;
+  steps: StepSummary[];
+  durationMs: number;
+  error?: string;
+}
+
+// ============================================================================
+// 4. Built-in Starter Module ("workspace") Contracts (Template for Parallel Units)
+// ============================================================================
+
+export type WorkspaceItemStatus = "todo" | "in_progress" | "done";
+
+export interface WorkspaceItemData {
+  title: string;
+  description: string;
+  status: WorkspaceItemStatus;
+  category: string;
+  aiSummary?: string;
+  tags: string[];
+}
+
+export interface WorkspaceAiSynthesizeRequest {
+  itemId?: string;
+  title: string;
+  description: string;
+  thinkingLevel?: ArgonThinkingLevel;
+  dryRun?: boolean;
+}
+
+export interface WorkspaceAiSynthesizeResponse {
+  item?: EntityRecord<WorkspaceItemData>;
+  aiSummary: string;
+  suggestedTags: string[];
+  interactionId: string;
+  durationMs: number;
 }

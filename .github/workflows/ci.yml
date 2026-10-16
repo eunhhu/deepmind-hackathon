@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   ts-biome-web:
-    name: Bun + Biome + TypeScript + SolidJS Build
+    name: Bun + Biome + TypeScript + Unit Tests + SolidJS Build
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -34,6 +34,9 @@ jobs:
 
       - name: Run TypeScript typecheck across workspaces
         run: bun run typecheck
+
+      - name: Run Bun unit tests across workspaces
+        run: bun run test
 
       - name: Build SolidJS production bundle (@deepmind/web)
         run: bun --filter @deepmind/web build
