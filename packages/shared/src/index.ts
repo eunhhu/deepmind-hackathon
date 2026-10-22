@@ -398,6 +398,66 @@ export interface AegisVulnerabilityFinding {
   zeroFalsePositiveConfirmed: boolean;
 }
 
+export type AegisDeliveryChannel = "github" | "web_url" | "api_server" | "binary_app";
+
+export type AegisSecuritySolutionId =
+  | "ast-pr-patch"
+  | "cicd-webhook"
+  | "sandbox-dast"
+  | "reverse-proxy-shield"
+  | "binary-hard-patch"
+  | "prepatched-installer"
+  | "local-self-healing-sdk";
+
+export interface AegisDeliveryChannelInputs {
+  githubRepoUrl?: string;
+  webTargetUrl?: string;
+  apiServerUrl?: string;
+  binaryAppName?: string;
+}
+
+export interface AegisSecuritySolutionOption {
+  id: AegisSecuritySolutionId;
+  title: string;
+  subtitle: string;
+  matchedChannels: AegisDeliveryChannel[];
+  badge: string;
+  recommended: boolean;
+}
+
+export interface AegisAutomationHookConfig {
+  enabled: boolean;
+  webhookUrl: string;
+  secretHeader: string;
+  triggers: string[];
+  lastTriggeredAt?: string;
+  totalRuns: number;
+  lastRunVerdict?: string;
+}
+
+export interface AegisLocalSdkStatus {
+  sdkPackage: string;
+  sdkVersion: string;
+  centralServerUrl: string;
+  connected: boolean;
+  autoPatchLocal: boolean;
+  patchedFilesCount: number;
+  lastSyncedAt?: string;
+  lastLocalPatchSummary?: string;
+  embedSnippet: string;
+}
+
+export interface AegisSafeDeliveryStatus {
+  prepatchedAppReady: boolean;
+  prepatchedInstallerName: string;
+  prepatchedDownloadUrl: string;
+  prepatchedSha256: string;
+  reverseProxyReady: boolean;
+  reverseProxyEndpoint: string;
+  upstreamOrigin: string;
+  protectionMode: string;
+}
+
 export interface AegisProject {
   id: string;
   name: string;
@@ -410,11 +470,18 @@ export interface AegisProject {
   repoUrl?: string;
   cdWorkflowPath?: string;
   targetUrl?: string;
+  apiServerUrl?: string;
   dnsDomain?: string;
   dnsTxtRecordName?: string;
   dnsTxtToken?: string;
   dnsVerified: boolean;
   binaryFileName?: string;
+  deliveryChannels?: AegisDeliveryChannel[];
+  channelInputs?: AegisDeliveryChannelInputs;
+  selectedSolutions?: AegisSecuritySolutionId[];
+  automationHook?: AegisAutomationHookConfig;
+  localSdkStatus?: AegisLocalSdkStatus;
+  safeDeliveryStatus?: AegisSafeDeliveryStatus;
   // Core security telemetry
   vulnerabilities: AegisVulnerabilityFinding[];
   timeline: AegisTimelineStep[];
@@ -431,9 +498,13 @@ export interface CreateAegisProjectRequest {
   repoUrl?: string;
   cdConfigSnippet?: string;
   targetUrl?: string;
+  apiServerUrl?: string;
   binaryFileName?: string;
   binarySizeBytes?: number;
   binaryHexPreview?: string;
+  deliveryChannels?: AegisDeliveryChannel[];
+  channelInputs?: AegisDeliveryChannelInputs;
+  selectedSolutions?: AegisSecuritySolutionId[];
 }
 
 export interface AegisVerifyDnsRequest {
@@ -519,3 +590,35 @@ export interface AegisCreatePrResponse {
 
 export type AegisPipelineStep = AegisTimelineStep;
 export type AegisGitPrReport = AegisGitHubPrReport;
+
+export interface AegisRecommendSolutionsRequest {
+  deliveryChannels: AegisDeliveryChannel[];
+  channelInputs?: AegisDeliveryChannelInputs;
+}
+
+export interface AegisRecommendSolutionsResponse {
+  deliveryChannels: AegisDeliveryChannel[];
+  recommendedSolutions: AegisSecuritySolutionOption[];
+  analysisSummary: string;
+}
+
+export interface AegisWebhookTriggerResponse {
+  projectId: string;
+  triggered: boolean;
+  event: string;
+  verdict: string;
+  remediationApplied: string;
+  timestamp: string;
+  project: AegisProject;
+}
+
+export interface AegisLocalSdkPatchResponse {
+  projectId: string;
+  centralServerUrl: string;
+  centralAnalysisModel: string;
+  localPatchApplied: boolean;
+  patchedFile: string;
+  patchSummary: string;
+  timestamp: string;
+  project: AegisProject;
+}

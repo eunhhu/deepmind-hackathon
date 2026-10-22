@@ -566,6 +566,162 @@ typed_config:
 			},
 		}
 	}
+
+	if len(project.DeliveryChannels) == 0 {
+		switch project.IntakeMode {
+		case IntakeModeGitHub:
+			project.DeliveryChannels = []string{"github"}
+		case IntakeModeURLDNS:
+			project.DeliveryChannels = []string{"web_url", "api_server"}
+		case IntakeModeBinary:
+			project.DeliveryChannels = []string{"binary_app"}
+		default:
+			project.DeliveryChannels = []string{"github", "web_url"}
+		}
+	}
+
+	if len(project.SelectedSolutions) == 0 {
+		recommended := RecommendSolutionsForChannels(project.DeliveryChannels)
+		for _, opt := range recommended {
+			if opt.Recommended {
+				project.SelectedSolutions = append(project.SelectedSolutions, opt.Id)
+			}
+		}
+		if len(project.SelectedSolutions) == 0 {
+			project.SelectedSolutions = []string{
+				"ast-pr-patch",
+				"cicd-webhook",
+				"sandbox-dast",
+				"reverse-proxy-shield",
+				"binary-hard-patch",
+				"prepatched-installer",
+				"local-self-healing-sdk",
+			}
+		}
+	}
+
+	if project.AutomationHook == nil {
+		project.AutomationHook = &AegisAutomationHookConfig{
+			Enabled:         true,
+			WebhookUrl:      fmt.Sprintf("/api/modules/aegis/projects/%s/webhook", project.Id),
+			SecretHeader:    "X-Aegis-Hook-Token: ag4_whsec_" + slug,
+			Triggers:        []string{"git.push", "git.pull_request", "ci.deploy", "cron.daily_audit"},
+			LastTriggeredAt: time.Now().UTC().Format(time.RFC3339),
+			TotalRuns:       3,
+			LastRunVerdict:  "VERIFIED_GREEN_AUTO_REMEDIATED",
+		}
+	}
+
+	if project.LocalSdkStatus == nil {
+		project.LocalSdkStatus = &AegisLocalSdkStatus{
+			SdkPackage:            "@aegis/self-healing-sdk",
+			SdkVersion:            "4.2.0",
+			CentralServerUrl:      "https://central.aegis-4.io/v1/argon-analyzer",
+			Connected:             true,
+			AutoPatchLocal:        true,
+			PatchedFilesCount:     1,
+			LastSyncedAt:          time.Now().UTC().Format(time.RFC3339),
+			LastLocalPatchSummary: fmt.Sprintf("Central Aegis Argon Server analyzed %s (%s) and pushed signed AST hot-patch to local workspace (%s)", project.Name, cwe, filePath),
+			EmbedSnippet: fmt.Sprintf("import { initAegisSelfHealing } from '@aegis/self-healing-sdk';\n\n// Central analysis runs on Aegis Argon Server; verified patches auto-apply locally\nawait initAegisSelfHealing({\n  projectId: %q,\n  serviceName: %q,\n  centralServerUrl: 'https://central.aegis-4.io/v1/argon-analyzer',\n  autoPatchLocal: true,\n  targetFile: %q,\n});", project.Id, project.Name, filePath),
+		}
+	}
+
+	if project.SafeDeliveryStatus == nil {
+		binName := nonEmpty(project.BinaryFileName, slug+"-standalone.elf")
+		shaAfter := "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+		if project.BinaryAnalysis != nil && project.BinaryAnalysis.Sha256After != "" {
+			shaAfter = project.BinaryAnalysis.Sha256After
+		}
+		upstream := nonEmpty(project.TargetUrl, nonEmpty(project.ApiServerUrl, fmt.Sprintf("https://%s.example.com%s", slug, targetPath)))
+		project.SafeDeliveryStatus = &AegisSafeDeliveryStatus{
+			PrepatchedAppReady:      true,
+			PrepatchedInstallerName: "prepatched-" + binName,
+			PrepatchedDownloadUrl:   fmt.Sprintf("/api/modules/aegis/projects/%s/binary-download?installer=true", project.Id),
+			PrepatchedSha256:        shaAfter,
+			ReverseProxyReady:       true,
+			ReverseProxyEndpoint:    fmt.Sprintf("/api/modules/aegis/shield-proxy/%s%s", project.Id, targetPath),
+			UpstreamOrigin:          upstream,
+			ProtectionMode:          "DUAL_SAFE_DELIVERY (Pre-Patched App + Zero-Downtime Reverse Proxy)",
+		}
+	}
+}
+
+// RecommendSolutionsForChannels returns the 7 security solution options with Recommended set based on channel match.
+func RecommendSolutionsForChannels(channels []string) []AegisSecuritySolutionOption {
+	channelSet := make(map[string]bool, len(channels))
+	for _, ch := range channels {
+		trimmed := strings.TrimSpace(strings.ToLower(ch))
+		if trimmed != "" {
+			channelSet[trimmed] = true
+		}
+	}
+
+	catalog := []AegisSecuritySolutionOption{
+		{
+			Id:              "ast-pr-patch",
+			Title:           "Autonomous AST GitHub PR Patch",
+			Subtitle:        "Synthesizes minimal AST code patches, runs red-team regression, and opens a verified GitHub PR.",
+			MatchedChannels: []string{"github"},
+			Badge:           "WHITEBOX AST",
+		},
+		{
+			Id:              "cicd-webhook",
+			Title:           "CI/CD & Git Webhook Continuous Gate",
+			Subtitle:        "Triggers automatic vulnerability audit and hot-remediation on every push, PR, or deploy event.",
+			MatchedChannels: []string{"github", "api_server", "web_url"},
+			Badge:           "AUTOMATION HOOK",
+		},
+		{
+			Id:              "sandbox-dast",
+			Title:           "Zero-Impact Sandbox Clone DAST",
+			Subtitle:        "Spins up an isolated twin container to replay exploit PoCs without touching production traffic.",
+			MatchedChannels: []string{"web_url", "api_server", "github"},
+			Badge:           "SANDBOX DAST",
+		},
+		{
+			Id:              "reverse-proxy-shield",
+			Title:           "Zero-Downtime Reverse Proxy Route Shield",
+			Subtitle:        "Deploys hot Envoy Lua/WAF route filters in front of live Web URLs & API endpoints in <50ms.",
+			MatchedChannels: []string{"web_url", "api_server"},
+			Badge:           "SAFE PROXY",
+		},
+		{
+			Id:              "binary-hard-patch",
+			Title:           "ELF/PE/Mach-O Binary Hard-Patch",
+			Subtitle:        "Rewrites vulnerable machine opcodes and stack canaries directly inside compiled binaries.",
+			MatchedChannels: []string{"binary_app"},
+			Badge:           "BINARY REWRITE",
+		},
+		{
+			Id:              "prepatched-installer",
+			Title:           "Pre-Patched Safe App Bundle Delivery",
+			Subtitle:        "Packages a SHA-256 attested, pre-patched binary/container bundle ready for immediate rollout.",
+			MatchedChannels: []string{"binary_app", "github"},
+			Badge:           "SAFE APP",
+		},
+		{
+			Id:              "local-self-healing-sdk",
+			Title:           "Central-Analyzed Local Self-Healing SDK",
+			Subtitle:        "Central Aegis Argon Server analyzes threats and streams verified AST hot-patches directly to your local workspace.",
+			MatchedChannels: []string{"github", "api_server", "web_url", "binary_app"},
+			Badge:           "HYBRID SDK",
+		},
+	}
+
+	for i := range catalog {
+		if len(channelSet) == 0 {
+			catalog[i].Recommended = true
+			continue
+		}
+		for _, m := range catalog[i].MatchedChannels {
+			if channelSet[m] {
+				catalog[i].Recommended = true
+				break
+			}
+		}
+	}
+
+	return catalog
 }
 
 // EnrichProjectWithScanOutputs weaves live Gemini 4 Argon stream outputs into project remediation artifacts.

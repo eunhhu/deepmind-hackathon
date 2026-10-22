@@ -147,6 +147,60 @@ type AegisVulnerabilityFinding struct {
 	ZeroFalsePositiveConfirmed bool    `json:"zeroFalsePositiveConfirmed"`
 }
 
+// AegisDeliveryChannelInputs stores optional per-channel target metadata during onboarding and recommendation.
+type AegisDeliveryChannelInputs struct {
+	GithubRepoUrl string `json:"githubRepoUrl,omitempty"`
+	WebTargetUrl  string `json:"webTargetUrl,omitempty"`
+	ApiServerUrl  string `json:"apiServerUrl,omitempty"`
+	BinaryAppName string `json:"binaryAppName,omitempty"`
+}
+
+// AegisSecuritySolutionOption describes a selectable remediation/defense capability matched to delivery channels.
+type AegisSecuritySolutionOption struct {
+	Id              string   `json:"id"`
+	Title           string   `json:"title"`
+	Subtitle        string   `json:"subtitle"`
+	MatchedChannels []string `json:"matchedChannels"`
+	Badge           string   `json:"badge"`
+	Recommended     bool     `json:"recommended"`
+}
+
+// AegisAutomationHookConfig represents CI/CD & Git webhook automation status for continuous defense.
+type AegisAutomationHookConfig struct {
+	Enabled         bool     `json:"enabled"`
+	WebhookUrl      string   `json:"webhookUrl"`
+	SecretHeader    string   `json:"secretHeader"`
+	Triggers        []string `json:"triggers"`
+	LastTriggeredAt string   `json:"lastTriggeredAt,omitempty"`
+	TotalRuns       int      `json:"totalRuns"`
+	LastRunVerdict  string   `json:"lastRunVerdict,omitempty"`
+}
+
+// AegisLocalSdkStatus represents the central-server-analyzed, local-workspace self-healing SDK integration.
+type AegisLocalSdkStatus struct {
+	SdkPackage            string `json:"sdkPackage"`
+	SdkVersion            string `json:"sdkVersion"`
+	CentralServerUrl      string `json:"centralServerUrl"`
+	Connected             bool   `json:"connected"`
+	AutoPatchLocal        bool   `json:"autoPatchLocal"`
+	PatchedFilesCount     int    `json:"patchedFilesCount"`
+	LastSyncedAt          string `json:"lastSyncedAt,omitempty"`
+	LastLocalPatchSummary string `json:"lastLocalPatchSummary,omitempty"`
+	EmbedSnippet          string `json:"embedSnippet"`
+}
+
+// AegisSafeDeliveryStatus represents dual safe delivery outputs: pre-patched app installer + zero-downtime reverse proxy.
+type AegisSafeDeliveryStatus struct {
+	PrepatchedAppReady      bool   `json:"prepatchedAppReady"`
+	PrepatchedInstallerName string `json:"prepatchedInstallerName"`
+	PrepatchedDownloadUrl   string `json:"prepatchedDownloadUrl"`
+	PrepatchedSha256        string `json:"prepatchedSha256"`
+	ReverseProxyReady       bool   `json:"reverseProxyReady"`
+	ReverseProxyEndpoint    string `json:"reverseProxyEndpoint"`
+	UpstreamOrigin          string `json:"upstreamOrigin"`
+	ProtectionMode          string `json:"protectionMode"`
+}
+
 // AegisProject represents a security target managed by Aegis across Whitebox GitHub, Blackbox URL, or Binary modes.
 type AegisProject struct {
 	Id                 string                      `json:"id"`
@@ -159,11 +213,18 @@ type AegisProject struct {
 	RepoUrl            string                      `json:"repoUrl,omitempty"`
 	CdWorkflowPath     string                      `json:"cdWorkflowPath,omitempty"`
 	TargetUrl          string                      `json:"targetUrl,omitempty"`
+	ApiServerUrl       string                      `json:"apiServerUrl,omitempty"`
 	DnsDomain          string                      `json:"dnsDomain,omitempty"`
 	DnsTxtRecordName   string                      `json:"dnsTxtRecordName,omitempty"`
 	DnsTxtToken        string                      `json:"dnsTxtToken,omitempty"`
 	DnsVerified        bool                        `json:"dnsVerified"`
 	BinaryFileName     string                      `json:"binaryFileName,omitempty"`
+	DeliveryChannels   []string                    `json:"deliveryChannels,omitempty"`
+	ChannelInputs      *AegisDeliveryChannelInputs `json:"channelInputs,omitempty"`
+	SelectedSolutions  []string                    `json:"selectedSolutions,omitempty"`
+	AutomationHook     *AegisAutomationHookConfig  `json:"automationHook,omitempty"`
+	LocalSdkStatus     *AegisLocalSdkStatus        `json:"localSdkStatus,omitempty"`
+	SafeDeliveryStatus *AegisSafeDeliveryStatus    `json:"safeDeliveryStatus,omitempty"`
 	Vulnerabilities    []AegisVulnerabilityFinding `json:"vulnerabilities"`
 	Timeline           []AegisTimelineStep         `json:"timeline"`
 	GitPrReport        *AegisGitHubPrReport        `json:"gitPrReport,omitempty"`
@@ -175,19 +236,55 @@ type AegisProject struct {
 
 // CreateAegisProjectRequest is the request payload to onboard a new Aegis target.
 type CreateAegisProjectRequest struct {
-	Name              string               `json:"name"`
-	Subtitle          string               `json:"subtitle,omitempty"`
-	IntakeMode        AegisIntakeMode      `json:"intakeMode"`
-	TargetType        AegisTargetType      `json:"targetType,omitempty"`
-	RemediationMode   AegisRemediationMode `json:"remediationMode,omitempty"`
-	RepoUrl           string               `json:"repoUrl,omitempty"`
-	CdWorkflowPath    string               `json:"cdWorkflowPath,omitempty"`
-	CdConfigSnippet   string               `json:"cdConfigSnippet,omitempty"`
-	TargetUrl         string               `json:"targetUrl,omitempty"`
-	DnsDomain         string               `json:"dnsDomain,omitempty"`
-	BinaryFileName    string               `json:"binaryFileName,omitempty"`
-	BinarySizeBytes   int64                `json:"binarySizeBytes,omitempty"`
-	BinaryHexPreview  string               `json:"binaryHexPreview,omitempty"`
+	Name              string                      `json:"name"`
+	Subtitle          string                      `json:"subtitle,omitempty"`
+	IntakeMode        AegisIntakeMode             `json:"intakeMode"`
+	TargetType        AegisTargetType             `json:"targetType,omitempty"`
+	RemediationMode   AegisRemediationMode        `json:"remediationMode,omitempty"`
+	RepoUrl           string                      `json:"repoUrl,omitempty"`
+	CdWorkflowPath    string                      `json:"cdWorkflowPath,omitempty"`
+	CdConfigSnippet   string                      `json:"cdConfigSnippet,omitempty"`
+	TargetUrl         string                      `json:"targetUrl,omitempty"`
+	ApiServerUrl      string                      `json:"apiServerUrl,omitempty"`
+	DnsDomain         string                      `json:"dnsDomain,omitempty"`
+	BinaryFileName    string                      `json:"binaryFileName,omitempty"`
+	BinarySizeBytes   int64                       `json:"binarySizeBytes,omitempty"`
+	BinaryHexPreview  string                      `json:"binaryHexPreview,omitempty"`
+	DeliveryChannels  []string                    `json:"deliveryChannels,omitempty"`
+	ChannelInputs     *AegisDeliveryChannelInputs `json:"channelInputs,omitempty"`
+	SelectedSolutions []string                    `json:"selectedSolutions,omitempty"`
+}
+
+type AegisRecommendSolutionsRequest struct {
+	DeliveryChannels []string                    `json:"deliveryChannels"`
+	ChannelInputs    *AegisDeliveryChannelInputs `json:"channelInputs,omitempty"`
+}
+
+type AegisRecommendSolutionsResponse struct {
+	DeliveryChannels     []string                      `json:"deliveryChannels"`
+	RecommendedSolutions []AegisSecuritySolutionOption `json:"recommendedSolutions"`
+	AnalysisSummary      string                        `json:"analysisSummary"`
+}
+
+type AegisWebhookTriggerResponse struct {
+	ProjectId          string       `json:"projectId"`
+	Triggered          bool         `json:"triggered"`
+	Event              string       `json:"event"`
+	Verdict            string       `json:"verdict"`
+	RemediationApplied string       `json:"remediationApplied"`
+	Timestamp          string       `json:"timestamp"`
+	Project            AegisProject `json:"project"`
+}
+
+type AegisLocalSdkPatchResponse struct {
+	ProjectId            string       `json:"projectId"`
+	CentralServerUrl     string       `json:"centralServerUrl"`
+	CentralAnalysisModel string       `json:"centralAnalysisModel"`
+	LocalPatchApplied    bool         `json:"localPatchApplied"`
+	PatchedFile          string       `json:"patchedFile"`
+	PatchSummary         string       `json:"patchSummary"`
+	Timestamp            string       `json:"timestamp"`
+	Project              AegisProject `json:"project"`
 }
 
 // AegisVerifyDnsRequest verifies domain ownership via DNS TXT record before active blackbox probing.

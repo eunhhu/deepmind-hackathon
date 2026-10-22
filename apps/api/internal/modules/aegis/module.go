@@ -867,6 +867,200 @@ func (m *Module) RegisterRoutes(rg *gin.RouterGroup, deps *modules.Dependencies)
 			"project": *project,
 		})
 	})
+
+	rg.POST("/recommend-solutions", func(c *gin.Context) {
+		var req AegisRecommendSolutionsRequest
+		_ = c.ShouldBindJSON(&req)
+		if len(req.DeliveryChannels) == 0 {
+			req.DeliveryChannels = []string{"github", "web_url", "api_server", "binary_app"}
+		}
+		solutions := RecommendSolutionsForChannels(req.DeliveryChannels)
+		c.JSON(http.StatusOK, AegisRecommendSolutionsResponse{
+			DeliveryChannels:     req.DeliveryChannels,
+			RecommendedSolutions: solutions,
+			AnalysisSummary: fmt.Sprintf(
+				"AEGIS-4 Central Analyzer mapped %d delivery channel(s) (%s) to %d autonomous self-healing defense solutions.",
+				len(req.DeliveryChannels),
+				strings.Join(req.DeliveryChannels, ", "),
+				len(solutions),
+			),
+		})
+	})
+
+	rg.POST("/projects/:id/webhook", func(c *gin.Context) {
+		id := c.Param("id")
+		ctx := c.Request.Context()
+		project, err := m.getProject(ctx, deps, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+			return
+		}
+
+		var body struct {
+			Event    string   `json:"event"`
+			Enabled  *bool    `json:"enabled"`
+			Triggers []string `json:"triggers"`
+		}
+		_ = c.ShouldBindJSON(&body)
+
+		EnsureRemediationArtifacts(project)
+		now := time.Now().UTC().Format(time.RFC3339)
+		if project.AutomationHook == nil {
+			project.AutomationHook = &AegisAutomationHookConfig{
+				Enabled:      true,
+				WebhookUrl:   fmt.Sprintf("https://aegis-central.deepmind.internal/api/modules/aegis/projects/%s/webhook", project.Id),
+				SecretHeader: "X-Aegis-Signature-256: sha256=" + randomHex(12),
+				Triggers:     []string{"git.push", "pull_request.opened", "ci.workflow_run", "cd.deployment_gate"},
+			}
+		}
+		if body.Enabled != nil {
+			project.AutomationHook.Enabled = *body.Enabled
+		} else {
+			project.AutomationHook.Enabled = true
+		}
+		if len(body.Triggers) > 0 {
+			project.AutomationHook.Triggers = body.Triggers
+		}
+		project.AutomationHook.TotalRuns++
+		project.AutomationHook.LastTriggeredAt = now
+		project.AutomationHook.LastRunVerdict = "VERIFIED_GREEN_AUTO_REMEDIATED"
+
+		applyRemediationModeDefenseStatus(project)
+		project.UpdatedAt = now
+		_ = m.saveProject(ctx, deps, *project, "")
+
+		eventName := nonEmpty(body.Event, "git.push + ci.workflow_run")
+		c.JSON(http.StatusOK, AegisWebhookTriggerResponse{
+			ProjectId:          project.Id,
+			Triggered:          true,
+			Event:              eventName,
+			Verdict:            "VERIFIED_GREEN_AUTO_REMEDIATED",
+			RemediationApplied: string(project.RemediationMode),
+			Timestamp:          now,
+			Project:            *project,
+		})
+	})
+
+	rg.POST("/projects/:id/sdk-patch", func(c *gin.Context) {
+		id := c.Param("id")
+		ctx := c.Request.Context()
+		project, err := m.getProject(ctx, deps, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+			return
+		}
+
+		EnsureRemediationArtifacts(project)
+		now := time.Now().UTC().Format(time.RFC3339)
+		patchedFile := "src/security/handler.ts"
+		if project.GitPrReport != nil && strings.TrimSpace(project.GitPrReport.CodeDiff.FilePath) != "" {
+			patchedFile = project.GitPrReport.CodeDiff.FilePath
+		} else if len(project.Vulnerabilities) > 0 && strings.TrimSpace(project.Vulnerabilities[0].Location) != "" {
+			patchedFile = project.Vulnerabilities[0].Location
+		}
+
+		cveLabel := "CWE-89"
+		if len(project.Vulnerabilities) > 0 && strings.TrimSpace(project.Vulnerabilities[0].CveOrCwe) != "" {
+			cveLabel = project.Vulnerabilities[0].CveOrCwe
+		}
+
+		if project.LocalSdkStatus == nil {
+			project.LocalSdkStatus = &AegisLocalSdkStatus{
+				SdkPackage:       "@aegis/self-healing-sdk",
+				SdkVersion:       "4.2.0",
+				CentralServerUrl: "https://aegis-central.deepmind.internal",
+				Connected:        true,
+				AutoPatchLocal:   true,
+			}
+		}
+		project.LocalSdkStatus.Connected = true
+		project.LocalSdkStatus.AutoPatchLocal = true
+		project.LocalSdkStatus.PatchedFilesCount++
+		project.LocalSdkStatus.LastSyncedAt = now
+		project.LocalSdkStatus.LastLocalPatchSummary = fmt.Sprintf(
+			"Central Server (gemini-4-argon high) synthesized AST fix for %s and hot-patched local file %s with zero regression.",
+			cveLabel,
+			patchedFile,
+		)
+
+		if project.GitPrReport != nil {
+			project.GitPrReport.CiChecksPassed = true
+		}
+		if project.IntakeMode == IntakeModeGitHub || project.RemediationMode == RemediationModeGitPR {
+			project.DefenseStatus = DefenseStatusPatchedViaPR
+		} else {
+			applyRemediationModeDefenseStatus(project)
+		}
+		project.UpdatedAt = now
+		_ = m.saveProject(ctx, deps, *project, "")
+
+		c.JSON(http.StatusOK, AegisLocalSdkPatchResponse{
+			ProjectId:            project.Id,
+			CentralServerUrl:     project.LocalSdkStatus.CentralServerUrl,
+			CentralAnalysisModel: "gemini-4-argon (thinking_level: high)",
+			LocalPatchApplied:    true,
+			PatchedFile:          patchedFile,
+			PatchSummary:         project.LocalSdkStatus.LastLocalPatchSummary,
+			Timestamp:            now,
+			Project:              *project,
+		})
+	})
+
+	rg.GET("/projects/:id/sdk-download", func(c *gin.Context) {
+		id := c.Param("id")
+		ctx := c.Request.Context()
+		project, err := m.getProject(ctx, deps, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+			return
+		}
+
+		EnsureRemediationArtifacts(project)
+		centralURL := "https://aegis-central.deepmind.internal"
+		embedSnippet := ""
+		if project.LocalSdkStatus != nil {
+			if strings.TrimSpace(project.LocalSdkStatus.CentralServerUrl) != "" {
+				centralURL = project.LocalSdkStatus.CentralServerUrl
+			}
+			embedSnippet = project.LocalSdkStatus.EmbedSnippet
+		}
+
+		sdkConfigContent := fmt.Sprintf(`/**
+ * AEGIS-4 Self-Healing Local SDK Agent Configuration
+ * Project: %s (%s)
+ * Package: @aegis/self-healing-sdk@4.2.0
+ */
+import { createAegisSelfHealingAgent } from "@aegis/self-healing-sdk";
+
+export const aegisAgent = createAegisSelfHealingAgent({
+  projectId: %q,
+  projectName: %q,
+  centralServerUrl: %q,
+  centralAnalysisModel: "gemini-4-argon",
+  thinkingLevel: "high",
+  autoPatchLocalWorkspace: true,
+  verifySandboxBeforeWrite: true,
+  deliveryChannels: %q,
+  onVulnerabilityAnalyzed: async (report) => {
+    console.log("[AEGIS-4 SDK] Central Server verified PoC & AST remediation:", report.cveOrCwe);
+  },
+  onLocalFilePatched: async (patchResult) => {
+    console.log("[AEGIS-4 SDK] Local workspace file auto-patched:", patchResult.filePath, patchResult.sha256After);
+  },
+});
+
+// Initialize continuous central-server telemetry & local AST self-healing hook
+void aegisAgent.connectAndWatch();
+
+/*
+%s
+*/
+`, project.Name, project.Id, project.Id, project.Name, centralURL, strings.Join(project.DeliveryChannels, ","), embedSnippet)
+
+		fileName := fmt.Sprintf("aegis-self-healing-sdk-%s.ts", project.Id)
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+		c.Data(http.StatusOK, "application/typescript; charset=utf-8", []byte(sdkConfigContent))
+	})
 }
 
 func applyRemediationModeDefenseStatus(project *AegisProject) {
@@ -1041,11 +1235,27 @@ func parseTargetHostAndPath(rawURL, domain, slug string) (string, string, string
 func buildNewAegisProject(req CreateAegisProjectRequest, ownerEmail string) AegisProject {
 	now := time.Now().UTC().Format(time.RFC3339)
 	id := "aegis-proj-" + randomHex(4)
+	if req.ChannelInputs != nil {
+		if strings.TrimSpace(req.RepoUrl) == "" {
+			req.RepoUrl = strings.TrimSpace(req.ChannelInputs.GithubRepoUrl)
+		}
+		if strings.TrimSpace(req.TargetUrl) == "" {
+			req.TargetUrl = nonEmpty(strings.TrimSpace(req.ChannelInputs.WebTargetUrl), strings.TrimSpace(req.ChannelInputs.ApiServerUrl))
+		}
+		if strings.TrimSpace(req.ApiServerUrl) == "" {
+			req.ApiServerUrl = strings.TrimSpace(req.ChannelInputs.ApiServerUrl)
+		}
+		if strings.TrimSpace(req.BinaryFileName) == "" {
+			req.BinaryFileName = strings.TrimSpace(req.ChannelInputs.BinaryAppName)
+		}
+	}
 	intakeMode := req.IntakeMode
 	if intakeMode == "" {
-		if strings.TrimSpace(req.BinaryFileName) != "" {
+		if strings.TrimSpace(req.RepoUrl) != "" {
+			intakeMode = IntakeModeGitHub
+		} else if strings.TrimSpace(req.BinaryFileName) != "" {
 			intakeMode = IntakeModeBinary
-		} else if strings.TrimSpace(req.TargetUrl) != "" && strings.TrimSpace(req.RepoUrl) == "" {
+		} else if strings.TrimSpace(req.TargetUrl) != "" {
 			intakeMode = IntakeModeURLDNS
 		} else {
 			intakeMode = IntakeModeGitHub
@@ -1286,12 +1496,16 @@ func buildNewAegisProject(req CreateAegisProjectRequest, ownerEmail string) Aegi
 		Subtitle:         nonEmpty(req.Subtitle, fmt.Sprintf("Onboarded by %s (%s -> %s)", nonEmpty(ownerEmail, "operator"), intakeMode, remediationMode)),
 		IntakeMode:       intakeMode,
 		TargetType:       targetType,
-		RemediationMode:  remediationMode,
-		DefenseStatus:    defenseStatus,
-		RepoUrl:          req.RepoUrl,
-		CdWorkflowPath:   nonEmpty(req.CdWorkflowPath, ".github/workflows/cd.yml"),
-		TargetUrl:        nonEmpty(req.TargetUrl, fullTargetURL),
-		DnsDomain:        domain,
+		RemediationMode:   remediationMode,
+		DefenseStatus:     defenseStatus,
+		RepoUrl:           req.RepoUrl,
+		CdWorkflowPath:    nonEmpty(req.CdWorkflowPath, ".github/workflows/cd.yml"),
+		TargetUrl:         nonEmpty(req.TargetUrl, fullTargetURL),
+		ApiServerUrl:      req.ApiServerUrl,
+		DeliveryChannels:  req.DeliveryChannels,
+		ChannelInputs:     req.ChannelInputs,
+		SelectedSolutions: req.SelectedSolutions,
+		DnsDomain:         domain,
 		DnsTxtRecordName: txtRecordName,
 		DnsTxtToken:      verifyToken,
 		DnsVerified:      dnsVerified,

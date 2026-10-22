@@ -1,10 +1,15 @@
 import type {
   AegisBinaryUploadRequest,
   AegisCreatePrResponse,
+  AegisDeliveryChannel,
+  AegisDeliveryChannelInputs,
+  AegisLocalSdkPatchResponse,
   AegisProject,
+  AegisRecommendSolutionsResponse,
   AegisRemediationMode,
   AegisScanStreamEvent,
   AegisUpdateShieldRuleRequest,
+  AegisWebhookTriggerResponse,
   AuthVerifyResponse,
   CreateEntityRequest,
   EntityRecord,
@@ -320,6 +325,49 @@ export async function deleteAegisProject(projectId: string): Promise<{ deleted: 
     `/api/modules/aegis/projects/${encodeURIComponent(projectId)}`,
     {
       method: "DELETE",
+    },
+  );
+}
+
+export function getAegisSdkDownloadUrl(projectId: string): string {
+  return `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/sdk-download`;
+}
+
+export function getAegisPrepatchedInstallerUrl(projectId: string): string {
+  return `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/binary-download?installer=true`;
+}
+
+export async function recommendAegisSolutions(
+  deliveryChannels: AegisDeliveryChannel[],
+  channelInputs?: AegisDeliveryChannelInputs,
+): Promise<AegisRecommendSolutionsResponse> {
+  return apiRequest<AegisRecommendSolutionsResponse>("/api/modules/aegis/recommend-solutions", {
+    method: "POST",
+    body: { deliveryChannels, channelInputs },
+  });
+}
+
+export async function triggerAegisAutomationWebhook(
+  projectId: string,
+  options: { enabled?: boolean; event?: string } = {},
+): Promise<AegisWebhookTriggerResponse> {
+  return apiRequest<AegisWebhookTriggerResponse>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/webhook`,
+    {
+      method: "POST",
+      body: options,
+    },
+  );
+}
+
+export async function runAegisLocalSdkPatch(
+  projectId: string,
+): Promise<AegisLocalSdkPatchResponse> {
+  return apiRequest<AegisLocalSdkPatchResponse>(
+    `/api/modules/aegis/projects/${encodeURIComponent(projectId)}/sdk-patch`,
+    {
+      method: "POST",
+      body: {},
     },
   );
 }
